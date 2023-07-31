@@ -46,6 +46,7 @@ with open(__jsonFile, 'r') as jsonFile:
 __nitterUrl = jsonConfig['nitterServer']
 __footerEmbedText = jsonConfig['config']['footerTextForEmbed']
 __footerEmbedImageUrl = jsonConfig['config']['footerImageUrlForEmbed']
+__twitterEmbedColor = jsonConfig['config']['footerColorForEmbed']
 
 for item in jsonConfig['twitterWatch']:
     twitterPullRssDataList.append(TwitterDbData(twitterHandleName=item['twitterHandleName'], twitterDbCode=item['twitterDbCode'], webhookUrl=item['webhookUrl']))
@@ -115,6 +116,10 @@ def removeHttpSFromString(inputString: str):
     return returnString
 
 
+def generateEmbedColor():
+    return random.choice(__twitterEmbedColor)
+
+
 def generateEmbedData(title: str, description: str, timestamp: any, authorName: str, authorUrl: str, authorIconUrl: str):
     # create embed object for webhook
     embed = DiscordEmbed()
@@ -122,6 +127,9 @@ def generateEmbedData(title: str, description: str, timestamp: any, authorName: 
     embed.set_author(name=authorName,
                      url=authorUrl,
                      icon_url=authorIconUrl)
+
+    # set Color
+    embed.set_color(generateEmbedColor())
 
     # set thumbnail
     # embed.set_thumbnail(url='your thumbnail url')
