@@ -1,0 +1,24 @@
+{
+  "config" : {
+    "footerTextForEmbed" : "Kurisutaru Twitter to Discord",
+    "footerImageUrlForEmbed" : "https://i.imgur.com/yae4JIT.png"
+  },
+  "nitterServer" : ["https://nitter.projectsegfau.lt", "https://twitter.moe.ngo", "https://singapore.unofficialbird.com"],
+  "twitterWatch" : [
+    {
+      "twitterHandleName" : "priconne_redive",
+      "twitterDbCode" : "PCRD",
+      "webhookUrl" : "https://discord.com/api/webhooks/482038691343106058/si3m9P2vh5xGTKbksS_UVErquKwVlJ1YxNcaVv6V8PNBreFkFcnzBmpH7uUKzR3TwxmM"
+    },
+    {
+      "twitterHandleName" : "pricone_GW",
+      "twitterDbCode" : "PCGW",
+      "webhookUrl" : "https://discord.com/api/webhooks/482038691343106058/si3m9P2vh5xGTKbksS_UVErquKwVlJ1YxNcaVv6V8PNBreFkFcnzBmpH7uUKzR3TwxmM"
+    },
+    {
+      "twitterHandleName" : "BLUEPROTOCOL_JP",
+      "twitterDbCode" : "BLPT",
+      "webhookUrl" : "https://discord.com/api/webhooks/1126817494833836112/Mxz4QOwVEvjhhFEhDEmu8zuwzuBpJx94Z-8QSn9VFOKblrL0cOPqWBPFJAIVvZyGMqyp"
+    }
+  ]
+}
