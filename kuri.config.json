@@ -1,7 +1,8 @@
 {
   "config" : {
     "footerTextForEmbed" : "Kurisutaru Twitter to Discord",
-    "footerImageUrlForEmbed" : "https://i.imgur.com/yae4JIT.png"
+    "footerImageUrlForEmbed" : "https://i.imgur.com/yae4JIT.png",
+    "footerColorForEmbed" : ["ffb3ba","ffdfba","ffffba","baffc9","bae1ff"]
   },
   "nitterServer" : ["https://nitter.projectsegfau.lt", "https://twitter.moe.ngo", "https://singapore.unofficialbird.com"],
   "twitterWatch" : [
