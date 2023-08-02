@@ -6,30 +6,29 @@ import sqlite3
 from collections import namedtuple
 from datetime import datetime
 from operator import attrgetter
-from urllib.parse import urljoin, unquote
-from urllib.parse import urlparse
+from urllib.parse import urljoin, unquote, urlparse
 
+import dateutil.parser
 import feedparser
-from dateutil.parser import *
-from discord_webhook import DiscordEmbed, DiscordWebhook
 from bs4 import BeautifulSoup
+from discord_webhook import DiscordEmbed, DiscordWebhook
 
 # Variable
-__twitterUrl = 'https://twitter.com'
-__twitterImageCardLinkTemplate = 'https://pbs.twimg.com/{}{}'
-__postVideoIdentifier = 'ext_tw_video_thumb'
-__postVideoTemplate = '''
+__twitterUrl: str = 'https://twitter.com'
+__twitterImageCardLinkTemplate: str = 'https://pbs.twimg.com/{}{}'
+__postVideoIdentifier: str = 'ext_tw_video_thumb'
+__postVideoTemplate: str = '''
 {}
 
 *[tweet has video]*
 '''
-__rssTemplate = '{}/{}/rss'
+__rssTemplate: str = '{}/{}/rss'
 
 # SQLite
-__sqliteDB = 'kuri.db'
+__sqliteDB: str = 'kuri.db'
 
 # JSONFile
-__jsonFile = 'kuri.config.json'
+__jsonFile: str = 'kuri.config.json'
 
 # Tuplestuff
 TwitterDbData = namedtuple('TwitterDbData', 'twitterHandleName twitterDbCode webhookUrl')
@@ -40,7 +39,7 @@ Post = namedtuple('Post', 'title description link key timestamp')
 twitterPullRssDataList = []
 twitterUserList = []
 
-with open(__jsonFile, 'r') as jsonFile:
+with open(__jsonFile, 'r', encoding='UTF-8') as jsonFile:
     jsonConfig = json.load(jsonFile)
 
 __nitterUrl = jsonConfig['nitterServer']
@@ -52,26 +51,26 @@ for item in jsonConfig['twitterWatch']:
     twitterPullRssDataList.append(TwitterDbData(twitterHandleName=item['twitterHandleName'], twitterDbCode=item['twitterDbCode'], webhookUrl=item['webhookUrl']))
 
 
-def generateRssUrl(twitterHandleName: str):
-    twitterUrl = random.choice(__nitterUrl)
-    return __rssTemplate.format(twitterUrl, twitterHandleName)
+def generateRssUrl(twitter_handle_name: str, nitter_url: str):
+    return __rssTemplate.format(nitter_url, twitter_handle_name)
 
 
-def replaceUrlToTwitter(inputString: str):
-    returnString = urljoin(__twitterUrl, urlparse(inputString).path)
+def replaceUrlToTwitter(inputString: str, twitterUrl: str):
+    returnString = urljoin(twitterUrl, urlparse(inputString).path)
     return returnString
 
 
-def replaceNitterUrlToTwitterUrl(inputString: str):
+def replaceNitterUrlToTwitterUrl(inputString: str, twitterUrl: str, nitterUrl: []):
     returnString = inputString.replace('http://', 'https://').replace('#m', '')
-    for serv in __nitterUrl:
-        returnString = returnString.replace(urlparse(serv).netloc, urlparse(__twitterUrl).netloc)
+    for serv in nitterUrl:
+        returnString = returnString.replace(urlparse(serv).netloc, urlparse(twitterUrl).netloc)
     return returnString
 
 
-def cleaningRssDescription(inputString: str):
+def cleaningRssDescription(inputString: str, twitterUrl: str, nitterUrl: []):
     returnString = inputString.replace('<![CDATA[', '').replace(']]>', '').replace(' />', '/>')
-    returnString = replaceNitterUrlToTwitterUrl(returnString)
+    for serv in nitterUrl:
+        returnString = returnString.replace(urlparse(serv).netloc, urlparse(twitterUrl).netloc)
     return returnString
 
 
@@ -85,12 +84,12 @@ def generateTwitterProfilePictureLink(inputString: str):
     return returnString
 
 
-def generateTwitterPictureLink(inputString: str):
+def generateTwitterPictureLink(inputString: str, twitterImageCardLinkTemplate: str):
     urlParseData = urlparse(unquote(inputString))
     queryParam = ""
     if bool(urlParseData.query):
         queryParam = str('?') + urlParseData.query
-    returnString = __twitterImageCardLinkTemplate.format(urlParseData.path, queryParam).replace('/pic/', '')
+    returnString = twitterImageCardLinkTemplate.format(urlParseData.path, queryParam).replace('/pic/', '')
     return returnString
 
 
@@ -104,7 +103,7 @@ def generateDateFromTimestamp(inputTime):
 
 def generateTwitterUserFromRSS(feedData: feedparser, key: str, webhookUrl: str):
     return TwitterUser(name=generateTwitterEmbedName(feedData.feed.image.title),
-                       link=replaceUrlToTwitter(feedData.feed.image.link),
+                       link=replaceUrlToTwitter(feedData.feed.image.link, __twitterUrl),
                        icon=generateTwitterProfilePictureLink(feedData.feed.image.href),
                        key=key,
                        webhookUrl=webhookUrl
@@ -120,7 +119,7 @@ def generateEmbedColor():
     return random.choice(__twitterEmbedColor)
 
 
-def generateEmbedData(title: str, description: str, timestamp: any, authorName: str, authorUrl: str, authorIconUrl: str):
+def generateEmbedData(title: str, description: str, timestamp: any, authorName: str, authorUrl: str, authorIconUrl: str, twitterCardLinkTemplate: str):
     # create embed object for webhook
     embed = DiscordEmbed()
 
@@ -139,7 +138,7 @@ def generateEmbedData(title: str, description: str, timestamp: any, authorName: 
     soup = BeautifulSoup(description, 'html.parser')
     imgUrl = soup.find('img')
     if imgUrl is not None:
-        embed.set_image(generateTwitterPictureLink(imgUrl['src']))
+        embed.set_image(generateTwitterPictureLink(imgUrl['src'], twitterCardLinkTemplate))
 
     # set footer
     embed.set_footer(text=__footerEmbedText, icon_url=__footerEmbedImageUrl)
@@ -155,39 +154,36 @@ def generateEmbedData(title: str, description: str, timestamp: any, authorName: 
     return embed
 
 
+# Save Twitter to SQLiteDB
 entryData = []
+nitterServerDistributionList = random.choices(__nitterUrl, k=len(twitterPullRssDataList))
 
-for item in twitterPullRssDataList:
-    feedParse = feedparser.parse(generateRssUrl(item.twitterHandleName))
+for item, nitter in zip(twitterPullRssDataList, nitterServerDistributionList):
+    feedParse = feedparser.parse(generateRssUrl(item.twitterHandleName, nitter))
     twitterUserList.append(generateTwitterUserFromRSS(feedParse, item.twitterDbCode, item.webhookUrl))
 
     for data in feedParse.entries:
         entryData.append(EntryData(title=data.title,
-                                   description=cleaningRssDescription(data.description),
-                                   link=replaceNitterUrlToTwitterUrl(data.link),
-                                   pubdate=parse(timestr=data.published),
+                                   description=cleaningRssDescription(data.description, __twitterUrl, __nitterUrl),
+                                   link=replaceNitterUrlToTwitterUrl(data.link, __twitterUrl, __nitterUrl),
+                                   pubdate=dateutil.parser.parse(timestr=data.published),
                                    timestamp=generateTimestamp(data.published_parsed),
                                    key=item.twitterDbCode
                                    )
                          )
-
-con = sqlite3.connect(__sqliteDB)
-cur = con.cursor()
-
 entryData = sorted(entryData, key=attrgetter('pubdate'))
 
-cur.executemany('INSERT OR IGNORE INTO post (title, description, link, pub_date, timestamp, key) VALUES(?, ?, ?, ?, ?, ?)', entryData)
-con.commit()
+conn = sqlite3.connect(__sqliteDB)
+conn.executemany('INSERT OR IGNORE INTO post (title, description, link, pub_date, timestamp, key) VALUES(?, ?, ?, ?, ?, ?)', entryData)
+conn.commit()
 
-# Reset Entry Data for reuseable
-entryData = []
+# Post Twitter to Discord Embed
+postData = []
 
-cur.execute('SELECT title, description, link, key, timestamp FROM post WHERE is_send = 0 ORDER BY timestamp')
-rows = cur.fetchall()
-for row in rows:
-    entryData.append(Post(row[0], row[1], row[2], row[3],  row[4]))
+for row in conn.execute('SELECT title, description, link, key, timestamp FROM post WHERE is_send = 0 ORDER BY timestamp'):
+    postData.append(Post(row[0], row[1], row[2], row[3],  row[4]))
 
-for data in entryData:
+for data in postData:
     twitterUser = [item for item in twitterUserList if item.key == data.key][0]
     if twitterUser is not None:
         webhook = DiscordWebhook(url=twitterUser.webhookUrl,
@@ -198,11 +194,13 @@ for data in entryData:
                                             timestamp=data.timestamp,
                                             authorName=twitterUser.name,
                                             authorUrl=twitterUser.link,
-                                            authorIconUrl=twitterUser.icon
+                                            authorIconUrl=twitterUser.icon,
+                                            twitterCardLinkTemplate=__twitterImageCardLinkTemplate
                                             )
                           )
         webhook.execute()
 
-updateData = [[item.link] for item in entryData]
-cur.executemany('UPDATE post SET is_send = 1 WHERE link = ?', updateData)
-con.commit()
+updateData = [[item.link] for item in postData]
+conn.executemany('UPDATE post SET is_send = 1 WHERE link = ?', updateData)
+conn.commit()
+conn.close()
