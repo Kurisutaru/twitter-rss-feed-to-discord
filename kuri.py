@@ -46,9 +46,12 @@ __nitterUrl = jsonConfig['nitterServer']
 __footerEmbedText = jsonConfig['config']['footerTextForEmbed']
 __footerEmbedImageUrl = jsonConfig['config']['footerImageUrlForEmbed']
 __twitterEmbedColor = jsonConfig['config']['footerColorForEmbed']
+__includeReTweet = jsonConfig['config']['includeReTweet']
 
 for item in jsonConfig['twitterWatch']:
-    twitterPullRssDataList.append(TwitterDbData(twitterHandleName=item['twitterHandleName'], twitterDbCode=item['twitterDbCode'], webhookUrl=item['webhookUrl']))
+    twitterPullRssDataList.append(
+        TwitterDbData(twitterHandleName=item['twitterHandleName'], twitterDbCode=item['twitterDbCode'],
+                      webhookUrl=item['webhookUrl']))
 
 
 def generateRssUrl(twitter_handle_name: str, nitter_url: str):
@@ -119,7 +122,12 @@ def generateEmbedColor():
     return random.choice(__twitterEmbedColor)
 
 
-def generateEmbedData(title: str, description: str, timestamp: any, authorName: str, authorUrl: str, authorIconUrl: str, twitterCardLinkTemplate: str):
+def isReTweet(inputString: str):
+    return "RT by" in inputString
+
+
+def generateEmbedData(title: str, description: str, timestamp: any, authorName: str, authorUrl: str, authorIconUrl: str,
+                      twitterCardLinkTemplate: str):
     # create embed object for webhook
     embed = DiscordEmbed()
 
@@ -163,25 +171,35 @@ for item, nitter in zip(twitterPullRssDataList, nitterServerDistributionList):
     twitterUserList.append(generateTwitterUserFromRSS(feedParse, item.twitterDbCode, item.webhookUrl))
 
     for data in feedParse.entries:
-        entryData.append(EntryData(title=data.title,
-                                   description=cleaningRssDescription(data.description, __twitterUrl, __nitterUrl),
-                                   link=replaceNitterUrlToTwitterUrl(data.link, __twitterUrl, __nitterUrl),
-                                   pubdate=dateutil.parser.parse(timestr=data.published),
-                                   timestamp=generateTimestamp(data.published_parsed),
-                                   key=item.twitterDbCode
-                                   )
-                         )
+        tempData = EntryData(title=data.title,
+                             description=cleaningRssDescription(data.description, __twitterUrl, __nitterUrl),
+                             link=replaceNitterUrlToTwitterUrl(data.link, __twitterUrl, __nitterUrl),
+                             pubdate=dateutil.parser.parse(timestr=data.published),
+                             timestamp=generateTimestamp(data.published_parsed),
+                             key=item.twitterDbCode
+                             )
+        test = isReTweet(data.title)
+        if isReTweet(data.title):
+            if __includeReTweet:
+                entryData.append(tempData)
+        else:
+            entryData.append(tempData)
+
+
 entryData = sorted(entryData, key=attrgetter('pubdate'))
 
 conn = sqlite3.connect(__sqliteDB)
-conn.executemany('INSERT OR IGNORE INTO post (title, description, link, pub_date, timestamp, key) VALUES(?, ?, ?, ?, ?, ?)', entryData)
+conn.executemany(
+    'INSERT OR IGNORE INTO post (title, description, link, pub_date, timestamp, key) VALUES(?, ?, ?, ?, ?, ?)',
+    entryData)
 conn.commit()
 
 # Post Twitter to Discord Embed
 postData = []
 
-for row in conn.execute('SELECT title, description, link, key, timestamp FROM post WHERE is_send = 0 ORDER BY timestamp'):
-    postData.append(Post(row[0], row[1], row[2], row[3],  row[4]))
+for row in conn.execute(
+        'SELECT title, description, link, key, timestamp FROM post WHERE is_send = 0 ORDER BY timestamp'):
+    postData.append(Post(row[0], row[1], row[2], row[3], row[4]))
 
 for data in postData:
     twitterUser = [item for item in twitterUserList if item.key == data.key][0]
