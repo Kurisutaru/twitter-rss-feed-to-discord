@@ -5,22 +5,28 @@
     "footerColorForEmbed" : ["ffb3ba","ffdfba","ffffba","baffc9","bae1ff"],
     "includeReTweet" : false
   },
-  "nitterServer" : [ "https://twitter.moe.ngo", "https://nitter.freedit.eu", "https://nitter.d420.de"],
+  "nitterServer" : ["https://nitter.d420.de"],
   "twitterWatch" : [
     {
       "twitterHandleName" : "priconne_redive",
       "twitterDbCode" : "PCRD",
-      "webhookUrl" : "https://discord.com/api/webhooks/482038691343106058/si3m9P2vh5xGTKbksS_UVErquKwVlJ1YxNcaVv6V8PNBreFkFcnzBmpH7uUKzR3TwxmM"
+      "webhookUrl" : "https://discord.com/api/webhooks/482038691343106058/si3m9P2vh5xGTKbksS_UVErquKwVlJ1YxNcaVv6V8PNBreFkFcnzBmpH7uUKzR3TwxmM",
+      "discordMention" : true,
+      "discordMentionRoleId" : "1151494484069208195"
     },
     {
       "twitterHandleName" : "pricone_GW",
       "twitterDbCode" : "PCGW",
-      "webhookUrl" : "https://discord.com/api/webhooks/482038691343106058/si3m9P2vh5xGTKbksS_UVErquKwVlJ1YxNcaVv6V8PNBreFkFcnzBmpH7uUKzR3TwxmM"
+      "webhookUrl" : "https://discord.com/api/webhooks/482038691343106058/si3m9P2vh5xGTKbksS_UVErquKwVlJ1YxNcaVv6V8PNBreFkFcnzBmpH7uUKzR3TwxmM",
+      "discordMention" : false,
+      "discordMentionRoleId" : "1151494484069208195"
     },
     {
       "twitterHandleName" : "BLUEPROTOCOL_JP",
       "twitterDbCode" : "BLPT",
-      "webhookUrl" : "https://discord.com/api/webhooks/1126817494833836112/Mxz4QOwVEvjhhFEhDEmu8zuwzuBpJx94Z-8QSn9VFOKblrL0cOPqWBPFJAIVvZyGMqyp"
+      "webhookUrl" : "https://discord.com/api/webhooks/1126817494833836112/Mxz4QOwVEvjhhFEhDEmu8zuwzuBpJx94Z-8QSn9VFOKblrL0cOPqWBPFJAIVvZyGMqyp",
+      "discordMention" : true,
+      "discordMentionRoleId" : "1151494539073298493"
     }
   ]
 }
