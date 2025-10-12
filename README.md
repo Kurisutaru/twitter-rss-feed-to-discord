@@ -4,6 +4,10 @@
 
 This project enables the pooling of data from a Twitter RSS feed sourced from a public Nitter Instance and forwards it to a Discord Webhook Embed. By utilizing this system, you can keep your Discord community updated with the latest tweets from a specific Twitter account without directly interacting with the platform.
 
+## Changelogs
+- Now support multiple webhook and multiple user mention
+- Revamped core code (mostly taken from my other project)
+
 ## Table of Contents
 
 - [Introduction](#introduction)
@@ -60,7 +64,6 @@ Before running the script, you need to configure some settings:
   "twitterWatch": [
     {
       "twitterHandleName": "{Twitter Handle Name without @, e.g., @Varenchinusu becomes Varenchinusu}",
-      "twitterDbCode": "Enter a unique code for DB identifier.",
       "webhookUrl": "https://{Discord Webhook URL}",
       "discordNotify": true,
       "discordNotifyRoleId": "1234567890"
@@ -96,15 +99,3 @@ We welcome and appreciate contributions to this project! If you want to contribu
 By contributing to this project, you agree to license your contributions under the same [MIT License](LICENSE) as the rest of the project.
 
 We appreciate your efforts and will review your contributions as soon as possible. Thank you for making this project better!
-
-## License
-
-The MIT License (MIT)
-
-Copyright (c) 2023 Kurisutaru, Kurisutaru.net
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
