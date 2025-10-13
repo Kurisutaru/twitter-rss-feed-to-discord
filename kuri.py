@@ -124,38 +124,41 @@ twitter_user_list: List[TwitterUser] = []
 
 
 def read_last_run(filename: str = __last_run_file) -> datetime:
-    """Read the last run timestamp from file."""
+    """Read the last processed tweet timestamp from file."""
     try:
         if os.path.exists(filename):
             with open(filename, 'r') as f:
                 timestamp_str = f.read().strip()
                 last_run = datetime.fromisoformat(timestamp_str)
-                # Ensure timezone-naive for comparison
+                # Convert to UTC if timezone-aware, then make naive
                 if last_run.tzinfo is not None:
-                    last_run = last_run.replace(tzinfo=None)
-                log.info(f"Last run timestamp: {last_run}")
+                    last_run = last_run.astimezone(timezone.utc).replace(tzinfo=None)
+                log.info(f"Last processed tweet timestamp: {last_run} (UTC)")
                 return last_run
         else:
-            log.info("No last_run.txt found, fetching all entries")
+            log.info("No last_run.txt found, will process all available entries")
+            # Return a very old date to process all entries on first run
             return datetime(2000, 1, 1)
     except Exception as read_error:
-        log.error(f"Error reading last run: {read_error}, using default")
+        log.error(f"Error reading last run: {read_error}, using default date")
         return datetime(2000, 1, 1)
 
 
-def write_last_run(timestamp: Optional[datetime] = None, filename: str = __last_run_file):
-    """Write timestamp to file."""
+def write_last_run(timestamp: datetime, filename: str = __last_run_file):
+    """
+    Write the timestamp of the latest processed tweet to file.
+    This should be the publication date of the most recent tweet we successfully processed.
+    """
     try:
-        if timestamp is None:
-            timestamp = datetime.now(timezone.utc)
-        # Ensure timezone-naive before saving
-        if isinstance(timestamp, datetime) and timestamp.tzinfo is not None:
-            timestamp = timestamp.replace(tzinfo=None)
+        # Convert to UTC if timezone-aware, then make naive for consistent storage
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+
         with open(filename, 'w') as f:
             f.write(timestamp.isoformat())
-        log.info(f"Updated last run time: {timestamp}")
+        log.info(f"Updated last processed tweet timestamp: {timestamp} (UTC)")
     except Exception as write_error:
-        log.error(f"Error writing last run: {write_error}")
+        log.error(f"Error writing last run timestamp: {write_error}")
 
 
 # Check if config file exist, if not abort
@@ -233,6 +236,19 @@ def generate_timestamp(input_time) -> int:
 def generate_date_from_timestamp(input_time) -> datetime:
     """Convert timestamp to datetime"""
     return datetime.fromtimestamp(input_time)
+
+
+def normalize_datetime_to_utc_naive(dt: datetime) -> datetime:
+    """
+    Normalize any datetime to UTC timezone-naive format for consistent comparison.
+    This ensures all dates are comparable regardless of their original timezone.
+    """
+    if dt.tzinfo is not None:
+        # Convert to UTC then strip timezone info
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        # Already naive, assume it's UTC
+        return dt
 
 
 def generate_twitter_user_from_rss(feed_data: feedparser, key: str, webhook_url: list[str], discord_mention: bool,
@@ -391,7 +407,7 @@ def generate_embed_data(title: str, media_count: int, has_video: bool, video_upl
 
     # Add media count if multiple
     if media_count > 1:
-        post_data = f'{post_data}\n\n📎 *Contains {media_count} media files*'
+        post_data = f'{post_data}\n\n🔎 *Contains {media_count} media files*'
 
     # set Description
     embed.set_description(post_data)
@@ -623,9 +639,9 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
 
 
 try:
-    # Read last run timestamp
+    # Read last run timestamp (this is the last processed tweet's pubdate)
     cutoff_time = read_last_run()
-    log.info(f"Filtering entries published after: {cutoff_time}")
+    log.info(f"Filtering entries published AFTER: {cutoff_time} (UTC)")
 
     # Collect entry data
     entryData: List[EntryData] = []
@@ -666,15 +682,14 @@ try:
                 )
 
             for data in feedParse.entries:
-                # Parse the published date
+                # Parse the published date and normalize to UTC naive
                 pub_date = dateutil.parser.parse(timestr=data.published)
+                pub_date = normalize_datetime_to_utc_naive(pub_date)
 
-                # Make timezone-naive for comparison
-                if pub_date.tzinfo is not None:
-                    pub_date = pub_date.replace(tzinfo=None)
-
-                # Only process entries newer than cutoff time
+                # Only process entries STRICTLY NEWER than cutoff time (exclusive)
+                # This prevents reprocessing the last tweet from previous run
                 if pub_date <= cutoff_time:
+                    log.debug(f"Skipping tweet from {pub_date} (not newer than {cutoff_time})")
                     continue
 
                 # Extract media from description
@@ -696,20 +711,24 @@ try:
                 if tempData.is_retweet():
                     if __include_re_tweet:
                         entryData.append(tempData)
+                        log.debug(f"Including retweet from {pub_date}")
                 else:
                     entryData.append(tempData)
+                    log.debug(f"Including original tweet from {pub_date}")
 
         except Exception as feed_error:
             log.error(f"Error processing feed for {item.twitterHandleName}: {feed_error}")
             continue
 
-    # Sort by publication date
+    # Sort by publication date (oldest first)
     entryData = sorted(entryData, key=attrgetter('pubdate'))
 
     log.info(f"Found {len(entryData)} new entries to post")
 
     # Post to Discord
     posted_count = 0
+    latest_successful_pubdate = None
+
     for data in entryData:
         # Find matching twitter user
         twitterUser = next((item for item in twitter_user_list if item.key == data.key), None)
@@ -718,6 +737,7 @@ try:
             continue
 
         try:
+            log.info(f"Posting tweet from {data.pubdate}: {data.link}")
             success = send_to_discord_with_media(
                 tweet_link=data.link,
                 title=data.title,
@@ -729,6 +749,9 @@ try:
 
             if success:
                 posted_count += 1
+                # Track the latest successfully posted tweet's pubdate
+                latest_successful_pubdate = data.pubdate
+                log.info(f"✅ Successfully posted tweet from {data.pubdate}")
 
             # Rate limit: 1 post per second
             time.sleep(1)
@@ -739,13 +762,17 @@ try:
 
     log.info(f"Successfully posted {posted_count}/{len(entryData)} tweets")
 
-    # Update last run timestamp
-    if entryData:
-        latest_entry = entryData[-1]
-        write_last_run(latest_entry.pubdate)
+    # CRITICAL: Update last_run.txt with the latest successfully posted tweet's pubdate
+    # This ensures next run will only fetch tweets AFTER this one
+    if latest_successful_pubdate:
+        write_last_run(latest_successful_pubdate)
+        log.info(f"✅ Updated checkpoint to latest posted tweet: {latest_successful_pubdate}")
+    elif entryData and posted_count == 0:
+        # We had entries but failed to post any - don't update checkpoint
+        log.warning("⚠️ Had entries but failed to post any - NOT updating checkpoint")
     else:
-        # Update to current time if no new entries
-        write_last_run()
+        # No new entries found at all - this is fine, don't update
+        log.info("No new entries found, checkpoint unchanged")
 
     log.info("Script completed successfully")
 
