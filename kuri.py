@@ -37,7 +37,12 @@ def kuri_zip_compression(file_path):
     """Simple compression with current date"""
     directory = os.path.dirname(file_path) or "."
     today = datetime.now().strftime("%Y-%m-%d")
-    zip_filename = os.path.join(directory, 'logs', f"app.{today}.log.zip")
+
+    log_dir = os.path.join(directory, 'logs')
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    zip_filename = os.path.join(log_dir, f"app.{today}.log.zip")
 
     with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.write(file_path, f"app.{today}.log")
