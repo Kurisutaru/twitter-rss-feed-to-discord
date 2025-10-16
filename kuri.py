@@ -1,8 +1,10 @@
+import atexit
 import calendar as cal
 import json
 import os
 import random
 import re
+import signal
 import sys
 import time
 import zipfile
@@ -53,6 +55,125 @@ def kuri_zip_compression(file_path):
 log.add(sys.stdout, format=log_format, colorize=True)
 log.add(log_file, rotation="sunday", compression=kuri_zip_compression,
         encoding="utf-8", level="INFO", format=log_format)
+
+
+class ScriptLock:
+    """Prevents multiple instances of the script from running simultaneously"""
+
+    def __init__(self, lock_file='script.lock', logger=None):
+        """
+        Initialize the lock with a lock file path
+
+        Args:
+            lock_file: Path to the lock file (default: script.lock in script directory)
+            logger: Logger instance to use (optional, will use loguru if not provided)
+        """
+        self.lock_file = os.path.join(script_dir, lock_file)
+        self.locked = False
+        self.log = logger if logger else log
+
+    def acquire(self):
+        """
+        Acquire the lock. If another instance is running, exit.
+
+        Returns:
+            bool: True if lock acquired successfully
+        """
+        if os.path.exists(self.lock_file):
+            # Check if the process is actually running
+            try:
+                with open(self.lock_file, 'r') as f:
+                    old_pid = int(f.read().strip())
+
+                # Check if process with this PID exists (cross-platform)
+                if self._is_process_running(old_pid):
+                    self.log.warning(f"Script is already running (PID: {old_pid}). Exiting.")
+                    sys.exit(0)
+                else:
+                    # Process doesn't exist, stale lock file
+                    self.log.info(f"Removing stale lock file (PID: {old_pid})")
+                    os.remove(self.lock_file)
+            except (ValueError, IOError):
+                # Invalid lock file, remove it
+                self.log.warning("Removing invalid lock file")
+                os.remove(self.lock_file)
+
+        # Create lock file with current PID
+        try:
+            with open(self.lock_file, 'w') as f:
+                f.write(str(os.getpid()))
+            self.locked = True
+            self.log.info(f"Lock acquired (PID: {os.getpid()})")
+
+            # Register cleanup on exit
+            atexit.register(self.release)
+
+            # Handle termination signals
+            signal.signal(signal.SIGTERM, self._signal_handler)
+            signal.signal(signal.SIGINT, self._signal_handler)
+
+            return True
+        except IOError as e:
+            self.log.error(f"Failed to create lock file: {e}")
+            sys.exit(1)
+
+    def release(self):
+        """Release the lock by removing the lock file"""
+        if self.locked and os.path.exists(self.lock_file):
+            try:
+                os.remove(self.lock_file)
+                self.locked = False
+                self.log.info("Lock released")
+            except OSError as e:
+                self.log.error(f"Failed to remove lock file: {e}")
+
+    def _signal_handler(self, signum, frame):
+        """Handle termination signals"""
+        self.log.info(f"Received signal {signum}, releasing lock")
+        self.release()
+        sys.exit(0)
+
+    def _is_process_running(self, pid):
+        """
+        Check if a process with the given PID is running (cross-platform).
+
+        Args:
+            pid: Process ID to check
+
+        Returns:
+            bool: True if process is running, False otherwise
+        """
+        import platform
+
+        if platform.system() == "Windows":
+            # Windows: Use tasklist command
+            import subprocess
+            try:
+                # Use tasklist to check if PID exists
+                result = subprocess.run(
+                    ['tasklist', '/FI', f'PID eq {pid}', '/NH', '/FO', 'CSV'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                # If PID exists, it will be in the output
+                return str(pid) in result.stdout
+            except (subprocess.SubprocessError, FileNotFoundError):
+                # If tasklist fails, assume process is not running
+                return False
+        else:
+            # Unix/Linux/Mac: Use os.kill with signal 0
+            try:
+                os.kill(pid, 0)
+                return True
+            except OSError:
+                return False
+
+# ===== PROCESS LOCK =====
+# Acquire lock immediately after logging is configured, to prevent when script stuck, and it runs again and again
+lock = ScriptLock('kuri.lock')
+lock.acquire()
+# ========================
 
 # Variable
 __twitter_url: str = 'https://x.com'
@@ -694,7 +815,7 @@ try:
                 # Only process entries STRICTLY NEWER than cutoff time (exclusive)
                 # This prevents reprocessing the last tweet from previous run
                 if pub_date <= cutoff_time:
-                    log.debug(f"Skipping tweet from {pub_date} (not newer than {cutoff_time})")
+                    #log.debug(f"Skipping tweet from {pub_date} (not newer than {cutoff_time})")
                     continue
 
                 # Extract media from description
