@@ -1,5 +1,6 @@
 import atexit
 import calendar as cal
+import hashlib
 import json
 import os
 import random
@@ -8,21 +9,20 @@ import signal
 import sys
 import time
 import zipfile
-import hashlib
-import requests
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from operator import attrgetter
 from os.path import isfile
 from pathlib import Path
+from typing import List, Union
 from urllib.parse import urljoin, unquote, urlparse
-from typing import List, Optional, Union
-from loguru import logger as log
 
 import dateutil.parser
 import feedparser
+import requests
 from bs4 import BeautifulSoup
 from discord_webhook import DiscordEmbed, DiscordWebhook
+from loguru import logger as log
 
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -168,6 +168,7 @@ class ScriptLock:
                 return True
             except OSError:
                 return False
+
 
 # ===== PROCESS LOCK =====
 # Acquire lock immediately after logging is configured, to prevent when script stuck, and it runs again and again
@@ -455,7 +456,7 @@ def extract_media_from_description(description: str, twitter_card_template: str)
             if source and source.get('src'):
                 video_url = source.get('src')
                 # Convert nitter video URL to Twitter CDN URL
-                twitter_video_url = video_url.replace('http://', 'https://')  # noqa: S104
+                twitter_video_url = video_url.replace('http://', 'https://')
                 extracted_media_list.append(TwitterMedia(url=twitter_video_url, type='video'))
 
             # Also get poster as fallback
@@ -593,50 +594,6 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
 
             # Check video size first
             log.info(f"Checking video size: {media.url}")
-            try:
-                head_response = requests.head(media.url, timeout=5, allow_redirects=True)
-                content_length = int(head_response.headers.get('content-length', 0))
-
-                if content_length == 0:
-                    # HEAD request didn't return size, try GET with stream
-                    log.warning("HEAD request returned 0 size, trying GET...")
-                    with requests.get(media.url, stream=True, timeout=5) as r:
-                        content_length = int(r.headers.get('content-length', 0))
-                        if content_length == 0:
-                            # Still no size, download and check actual size
-                            log.warning("Content-Length header missing, downloading to check size...")
-                            video_content = r.content
-                            content_length = len(video_content)
-
-                            # Check if too large
-                            if content_length > max_file_size:
-                                log.warning(
-                                    f"Video too large ({content_length / 1024 / 1024:.2f}MB) after download. Max: 25MB")
-                                video_too_large = True
-                                continue
-
-                            # Size OK, save downloaded data
-                            log.info(f"Video size: {content_length / 1024 / 1024:.2f}MB (checked after download)")
-                            media_data.append((filename, video_content, 'video'))
-                            video_uploaded = True
-                            log.info(f"✅ Video ready for upload: {filename}")
-                            continue  # Skip the normal download below
-
-                if content_length > max_file_size:
-                    log.warning(
-                        f"Video too large ({content_length / 1024 / 1024:.2f}MB), will use thumbnail. Max: 25MB")
-                    video_too_large = True
-                    continue
-                elif content_length > max_video_size:
-                    log.warning(f"Video large ({content_length / 1024 / 1024:.2f}MB), but within limit. Downloading...")
-                else:
-                    log.info(f"Video size: {content_length / 1024 / 1024:.2f}MB")
-
-            except Exception as size_check_error:
-                log.error(f"Error checking video size: {size_check_error}, attempting download anyway...")
-
-            # Download the video
-            log.info(f"Downloading video: {media.url}")
             with requests.get(media.url, stream=True, timeout=30) as r:
                 r.raise_for_status()
                 video_content = r.content
@@ -815,7 +772,7 @@ try:
                 # Only process entries STRICTLY NEWER than cutoff time (exclusive)
                 # This prevents reprocessing the last tweet from previous run
                 if pub_date <= cutoff_time:
-                    #log.debug(f"Skipping tweet from {pub_date} (not newer than {cutoff_time})")
+                    # log.debug(f"Skipping tweet from {pub_date} (not newer than {cutoff_time})")
                     continue
 
                 # Extract media from description
