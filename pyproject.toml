@@ -8,5 +8,6 @@ dependencies = [
     "discord-webhook>=1.4.1",
     "feedparser>=6.0.12",
     "loguru>=0.7.3",
+    "lxml>=6.0.2",
     "python-dateutil>=2.9.0.post0",
 ]

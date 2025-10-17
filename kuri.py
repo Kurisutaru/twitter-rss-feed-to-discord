@@ -444,7 +444,7 @@ def extract_media_from_description(description: str, twitter_card_template: str)
     extracted_media_list = []
     global video_detected
     video_detected = False
-    soup = BeautifulSoup(description, 'html.parser')
+    soup = BeautifulSoup(description, 'lxml')
 
     # Check for video elements first (embedded videos with source)
     video_elements = soup.find_all('video')
