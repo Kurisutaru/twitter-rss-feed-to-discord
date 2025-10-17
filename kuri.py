@@ -23,6 +23,8 @@ import requests
 from bs4 import BeautifulSoup
 from discord_webhook import DiscordEmbed, DiscordWebhook
 from loguru import logger as log
+from requests.adapters import HTTPAdapter
+from urllib3 import Retry
 
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -249,6 +251,48 @@ class EntryData:
 twitter_pull_rss_data_list: List[TwitterDbData] = []
 twitter_user_list: List[TwitterUser] = []
 
+
+# ===== OPTIMIZED HTTP SESSION =====
+# Create global session with connection pooling, on profiling it's hogged by SSL handshake request
+def create_optimized_session():
+    session = requests.Session()
+
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+
+    adapter = HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=15,
+        pool_maxsize=30,
+        pool_block=False
+    )
+
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+    })
+
+    return session
+
+
+# Create global session (initialized once, reused for all requests)
+http_session = create_optimized_session()
+
+
+# Register cleanup
+def cleanup_http_session():
+    http_session.close()
+    log.info("HTTP session closed")
+
+
+atexit.register(cleanup_http_session)
 
 def read_last_run(filename: str = __last_run_file) -> datetime:
     """Read the last processed tweet timestamp from file."""
@@ -571,7 +615,7 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
     if twitter_user.icon:
         try:
             log.info(f"Downloading author icon: {twitter_user.icon}")
-            with requests.get(twitter_user.icon, stream=True, timeout=5) as r:
+            with http_session.get(twitter_user.icon, stream=True, timeout=5) as r:
                 r.raise_for_status()
                 author_icon_filename = f"profile_{hashlib.md5(twitter_user.icon.encode()).hexdigest()[:8]}.jpg"
                 author_icon_data = r.content
@@ -594,7 +638,7 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
 
             # Check video size first
             log.info(f"Checking video size: {media.url}")
-            with requests.get(media.url, stream=True, timeout=30) as r:
+            with http_session.get(media.url, stream=True, timeout=30) as r:
                 r.raise_for_status()
                 video_content = r.content
 
@@ -626,7 +670,7 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
             filename = generate_media_filename(media.url, len(media_data))
 
             log.info(f"Downloading image: {media.url}")
-            with requests.get(media.url, stream=True, timeout=10) as r:
+            with http_session.get(media.url, stream=True, timeout=10) as r:
                 r.raise_for_status()
                 media_data.append((filename, r.content, 'image'))
 
@@ -649,7 +693,7 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
                 filename = generate_media_filename(media.url, len(media_data))
 
                 log.info(f"Downloading video thumbnail: {media.url}")
-                with requests.get(media.url, stream=True, timeout=10) as r:
+                with http_session.get(media.url, stream=True, timeout=10) as r:
                     r.raise_for_status()
                     media_data.append((filename, r.content, 'image'))
 
@@ -836,8 +880,9 @@ try:
                 latest_successful_pubdate = data.pubdate
                 log.info(f"✅ Successfully posted tweet from {data.pubdate}")
 
-            # Rate limit: 1 post per second
-            time.sleep(1)
+            # There's no hardcoded limit though, and I already put the retry on the webhook itself
+            # So it safe to reduce to small amount I guess ?
+            time.sleep(0.2)
 
         except Exception as post_error:
             log.error(f"Error posting to Discord: {post_error}")
