@@ -223,7 +223,7 @@ class TwitterUser:
     key: str
     webhookUrl: list  # Changed to list to support multiple webhooks
     discordMention: bool
-    discordMentionRoleId: list  # Changed to list to support multiple role mentions
+    discordMentionRoleId: list[str]  # Changed to list to support multiple role mentions
 
 
 @dataclass
@@ -746,7 +746,19 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
     for webhook_url in twitter_user.webhookUrl:
         try:
             log.info(f"Sending to webhook: {webhook_url[:50]}...")
+
             webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
+
+            # I just realize you need this ? I thought just <@ already enough
+            # That's why sometimes it's not having pinging sound
+            # Can be improved if needed, ping user perhaps, for now just Role
+            # https://discord.com/developers/docs/resources/message#allowed-mentions-object
+            if twitter_user.discordMention and twitter_user.discordMentionRoleId:
+                allowed_mentions = {
+                    "parse": ["roles"],
+                    "users": []
+                }
+                webhook.allowed_mentions = allowed_mentions
 
             # Add author icon if available
             if author_icon_data:
