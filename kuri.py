@@ -546,42 +546,49 @@ def generate_embed_color() -> str:
 
 
 def generate_embed_data(title: str, media_count: int, has_video: bool, video_uploaded: bool,
-                        timestamp: float, author_name: str, author_url: str, author_icon_url: str) -> DiscordEmbed:
+                        timestamp: float, author_name: str = None, author_url: str = None,
+                        author_icon_url: str = None) -> DiscordEmbed:
     """
     Create embed object for webhook.
-    Retains the original embed style.
-    Author icon can be either a URL or attachment:// reference.
+    Modified to support creating minimal embeds for gallery images.
+    Author fields are optional to support secondary embeds in gallery.
+    Because I just discover that if you want multiple image like gallery,
+    it needs to send multiple embed with ONE URL, so Discord will be grouping it together.
     """
     embed = DiscordEmbed()
 
-    # Set author with icon (can be URL or attachment://)
-    embed.set_author(name=author_name,
-                     url=author_url,
-                     icon_url=author_icon_url)
+    # Set author with icon (only if provided)
+    if author_name and author_url:
+        embed.set_author(name=author_name,
+                         url=author_url,
+                         icon_url=author_icon_url)
 
     # set Color
     embed.set_color(generate_embed_color())
 
-    # set footer
-    embed.set_footer(text=__footer_embed_text, icon_url=__footer_embed_image_url)
+    # set footer (only on first embed)
+    if author_name:  # Using author_name as proxy for "is first embed"
+        embed.set_footer(text=__footer_embed_text, icon_url=__footer_embed_image_url)
 
-    # set timestamp
-    embed.set_timestamp(timestamp)
+    # set timestamp (only if provided)
+    if timestamp:
+        embed.set_timestamp(timestamp)
 
-    # Clean the tweet text
-    post_data = clean_tweet_text(title)
+    # Only add description if title is provided (first embed only)
+    if title:
+        # Clean the tweet text
+        post_data = clean_tweet_text(title)
 
-    # Only add video indicator if video was successfully uploaded
-    # (Other video messages are handled in send_to_discord_with_media)
-    if has_video and video_uploaded:
-        post_data = f'{post_data}\n\n🎥 *[tweet has video]*'
+        # Only add video indicator if video was successfully uploaded
+        if has_video and video_uploaded:
+            post_data = f'{post_data}\n\n🎥 *[tweet has video]*'
 
-    # Add media count if multiple
-    if media_count > 1:
-        post_data = f'{post_data}\n\n🔎 *Contains {media_count} media files*'
+        # Add media count if multiple (only for first embed)
+        if media_count > 1:
+            post_data = f'{post_data}\n\n📎 *Contains {media_count} media files*'
 
-    # set Description
-    embed.set_description(post_data)
+        # set Description
+        embed.set_description(post_data)
 
     return embed
 
@@ -590,9 +597,8 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
                                timestamp: float, twitter_user: TwitterUser) -> bool:
     """
     Send tweet to Discord with media uploaded as attachments.
-    Supports multiple webhooks and multiple role mentions.
-    Priority: Videos first, then images.
-    Also uploads author profile picture as attachment.
+    Supports multiple webhooks, multiple role mentions, and multiple image embeds.
+    Priority: Videos first, then images (excluding video thumbnails when video is available).
     Returns True if all webhooks successful, False otherwise.
     """
     # Discord file size limits (in bytes)
@@ -702,12 +708,38 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
                 continue
 
     # Update title based on video status
+    updated_title = title
     if tweet_has_video and not video_uploaded:
         if video_too_large:
-            title = f"{title}\n\n🎥 *[Video too large for Discord (>25MB), click link to watch]*"
+            updated_title = f"{title}\n\n🎥 *[Video too large for Discord (>25MB), click link to watch]*"
         else:
             # Video exists but RSS doesn't provide the video file
-            title = f"{title}\n\n🎥 *[This tweet has video - click link to watch]*"
+            updated_title = f"{title}\n\n🎥 *[This tweet has video - click link to watch]*"
+
+    # Filter media for embed display
+    # Rule: If video was uploaded, don't show video thumbnails in embed
+    # If video was NOT uploaded, show video thumbnails
+    # Always show regular images
+    embed_media = []
+    for filename, file_data, file_type in media_data:
+        if file_type == 'video':
+            # Videos are not displayed in embed images (Discord shows them separately)
+            continue
+        elif file_type == 'image':
+            # Check if this is actually a video thumbnail by checking filename
+            is_video_thumb = 'tweet_video_thumb' in filename or 'video_thumb' in filename
+
+            if is_video_thumb and video_uploaded:
+                # Skip video thumbnails if we successfully uploaded the video
+                log.info(f"Skipping video thumbnail {filename} (video was uploaded)")
+                continue
+            else:
+                # Include regular images or thumbnails when video not available
+                embed_media.append((filename, file_data, file_type))
+        else:
+            embed_media.append((filename, file_data, file_type))
+
+    log.info(f"Embed will display {len(embed_media)} images (filtered from {len(media_data)} total media)")
 
     # Now send to all webhooks
     all_success = True
@@ -727,25 +759,43 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
             for filename, file_data, file_type in media_data:
                 webhook.add_file(file=file_data, filename=filename)
 
-            # Create embed
-            embed = generate_embed_data(
-                title=title,
-                media_count=len(media_data),
-                has_video=tweet_has_video,
-                video_uploaded=video_uploaded,
-                timestamp=timestamp,
-                author_name=twitter_user.name,
-                author_url=twitter_user.link,
-                author_icon_url=author_icon_url
-            )
+            # Create embeds - one for each image to enable Discord gallery view
+            # All embeds share the same URL so Discord groups them together
+            if embed_media:
+                for idx, (filename, _, file_type) in enumerate(embed_media):
+                    # Variable check, only first embed have content, others just image and url
+                    is_first_index = idx == 0
+                    embed = generate_embed_data(
+                        title=updated_title if is_first_index else "",  # Only first embed has title/description
+                        media_count=len(embed_media),
+                        has_video=tweet_has_video,
+                        video_uploaded=video_uploaded,
+                        timestamp=timestamp if is_first_index else None,  # Only first embed has timestamp
+                        author_name=twitter_user.name if is_first_index else None,
+                        author_url=twitter_user.link if is_first_index else None,
+                        author_icon_url=author_icon_url if is_first_index else None
+                    )
 
-            # Set first non-video file as embed image
-            for filename, _, file_type in media_data:
-                if file_type != 'video':
+                    # Set the image for this embed
                     embed.set_image(url=f"attachment://{filename}")
-                    break
 
-            webhook.add_embed(embed)
+                    # CRITICAL: Set the same URL for all embeds so Discord groups them
+                    embed.set_url(tweet_link)
+
+                    webhook.add_embed(embed)
+            else:
+                # No images to display (video-only or all filtered out)
+                embed = generate_embed_data(
+                    title=updated_title,
+                    media_count=len(media_data),
+                    has_video=tweet_has_video,
+                    video_uploaded=video_uploaded,
+                    timestamp=timestamp,
+                    author_name=twitter_user.name,
+                    author_url=twitter_user.link,
+                    author_icon_url=author_icon_url
+                )
+                webhook.add_embed(embed)
 
             response = webhook.execute()
             if response.ok:
@@ -760,7 +810,8 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
             continue
 
     if all_success:
-        log.info(f"✅ Posted tweet with {len(media_data)} media files to {len(twitter_user.webhookUrl)} webhook(s)")
+        log.info(
+            f"✅ Posted tweet with {len(media_data)} media files ({len(embed_media)} in embeds) to {len(twitter_user.webhookUrl)} webhook(s)")
 
     return all_success
 
