@@ -753,12 +753,15 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
             # That's why sometimes it's not having pinging sound
             # Can be improved if needed, ping user perhaps, for now just Role
             # https://discord.com/developers/docs/resources/message#allowed-mentions-object
-            if twitter_user.discordMention and twitter_user.discordMentionRoleId:
-                allowed_mentions = {
-                    "parse": ["roles"],
-                    "users": []
-                }
-                webhook.allowed_mentions = allowed_mentions
+            # ===== Post Mortem =====
+            # Kuri Edit : Nvm, if you don't set the allowed mention, it will parse all mention
+            # Then just don't set it, probably if you want more granular setting who's getting pinged sound
+            # if twitter_user.discordMention and twitter_user.discordMentionRoleId:
+            #     allowed_mentions = {
+            #         "parse": ["roles"],
+            #         "users": []
+            #     }
+            #     webhook.allowed_mentions = allowed_mentions
 
             # Add author icon if available
             if author_icon_data:
