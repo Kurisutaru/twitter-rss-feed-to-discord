@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from operator import attrgetter
 from os.path import isfile
 from pathlib import Path
-from typing import List, Union
+from typing import List, Union, Any
 from urllib.parse import urljoin, unquote, urlparse
 
 import dateutil.parser
@@ -345,6 +345,8 @@ __footer_embed_text = jsonConfig['config']['footerTextForEmbed']
 __footer_embed_image_url = jsonConfig['config']['footerImageUrlForEmbed']
 __twitter_embed_color = jsonConfig['config']['footerColorForEmbed']
 __include_re_tweet = jsonConfig['config']['includeReTweet']
+__generate_embed = jsonConfig['config']['generateEmbed']
+__replace_twitter_link_in_post = jsonConfig['config']['replaceTwitterLinkInPost']
 
 for item in jsonConfig['twitterWatch']:
     if item.get('twitterHandleName') and item.get('webhookUrl'):
@@ -592,30 +594,19 @@ def generate_embed_data(title: str, media_count: int, has_video: bool, video_upl
 
     return embed
 
-
-def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: List[TwitterMedia], tweet_has_video: bool,
-                               timestamp: float, twitter_user: TwitterUser) -> bool:
-    """
-    Send tweet to Discord with media uploaded as attachments.
-    Supports multiple webhooks, multiple role mentions, and multiple image embeds.
-    Priority: Videos first, then images (excluding video thumbnails when video is available).
-    Returns True if all webhooks successful, False otherwise.
-    """
+# Consolidate for generate media thingy, so it will be on one block, not separate like previous due the switch
+def generate_media_webhook(title: str, tweet_media_list: List[TwitterMedia], tweet_has_video: bool, twitter_user: TwitterUser) -> \
+        tuple[bytes | None | Any, str | None, str, bool, list[Any], list[Any]]:
     # Discord file size limits (in bytes)
     max_file_size = 25 * 1024 * 1024  # 25MB for regular servers
     max_video_size = 10 * 1024 * 1024  # 10MB soft limit for videos (faster upload)
 
-    # Build base content with role mentions
-    content = tweet_link
-    if twitter_user.discordMention and twitter_user.discordMentionRoleId:
-        # Loop through role IDs and mention each
-        mentions = ' '.join([f'<@&{role_id}>' for role_id in twitter_user.discordMentionRoleId])
-        content = f'{content}\n{mentions}'
-
     # Prepare media data (download once, use for all webhooks)
-    media_data = []
     author_icon_data = None
     author_icon_filename = None
+    embed_media = []
+    media_data = []
+    updated_title = title
 
     # Download author profile picture (if available)
     if twitter_user.icon:
@@ -708,7 +699,6 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
                 continue
 
     # Update title based on video status
-    updated_title = title
     if tweet_has_video and not video_uploaded:
         if video_too_large:
             updated_title = f"{title}\n\n🎥 *[Video too large for Discord (>25MB), click link to watch]*"
@@ -720,7 +710,6 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
     # Rule: If video was uploaded, don't show video thumbnails in embed
     # If video was NOT uploaded, show video thumbnails
     # Always show regular images
-    embed_media = []
     for filename, file_data, file_type in media_data:
         if file_type == 'video':
             # Videos are not displayed in embed images (Discord shows them separately)
@@ -741,6 +730,29 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
 
     log.info(f"Embed will display {len(embed_media)} images (filtered from {len(media_data)} total media)")
 
+    return author_icon_data, author_icon_filename, updated_title, video_uploaded, embed_media, media_data
+
+
+def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: List[TwitterMedia], tweet_has_video: bool,
+                               timestamp: float, twitter_user: TwitterUser) -> bool:
+    """
+    Send tweet to Discord with media uploaded as attachments.
+    Supports multiple webhooks, multiple role mentions, and multiple image embeds.
+    Priority: Videos first, then images (excluding video thumbnails when video is available).
+    Returns True if all webhooks successful, False otherwise.
+    """
+
+    # Replace twitter link with let say fixupx.com or something for better embed, if on config were empty, then no replace
+    content = tweet_link
+    if __replace_twitter_link_in_post:
+        content = content.replace(__twitter_url, __replace_twitter_link_in_post)
+
+    # Build base content with role mentions
+    if twitter_user.discordMention and twitter_user.discordMentionRoleId:
+        # Loop through role IDs and mention each
+        mentions = ' '.join([f'<@&{role_id}>' for role_id in twitter_user.discordMentionRoleId])
+        content = f'{content}\n{mentions}'
+
     # Now send to all webhooks
     all_success = True
     for webhook_url in twitter_user.webhookUrl:
@@ -749,68 +761,76 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
 
             webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
 
-            # I just realize you need this ? I thought just <@ already enough
-            # That's why sometimes it's not having pinging sound
-            # Can be improved if needed, ping user perhaps, for now just Role
-            # https://discord.com/developers/docs/resources/message#allowed-mentions-object
-            # ===== Post Mortem =====
-            # Kuri Edit : Nvm, if you don't set the allowed mention, it will parse all mention
-            # Then just don't set it, probably if you want more granular setting who's getting pinged sound
-            # if twitter_user.discordMention and twitter_user.discordMentionRoleId:
-            #     allowed_mentions = {
-            #         "parse": ["roles"],
-            #         "users": []
-            #     }
-            #     webhook.allowed_mentions = allowed_mentions
+            media_data = []
+            embed_media = []
 
-            # Add author icon if available
-            if author_icon_data:
-                webhook.add_file(file=author_icon_data, filename=author_icon_filename)
-                author_icon_url = f"attachment://{author_icon_filename}"
-            else:
-                author_icon_url = twitter_user.icon
+            # Adding switch to generate embed
+            if __generate_embed:
+                # I just realize you need this ? I thought just <@ already enough
+                # That's why sometimes it's not having pinging sound
+                # Can be improved if needed, ping user perhaps, for now just Role
+                # https://discord.com/developers/docs/resources/message#allowed-mentions-object
+                # ===== Post Mortem =====
+                # Kuri Edit : Nvm, if you don't set the allowed mention, it will parse all mention
+                # Then just don't set it, probably if you want more granular setting who's getting pinged sound
+                # if twitter_user.discordMention and twitter_user.discordMentionRoleId:
+                #     allowed_mentions = {
+                #         "parse": ["roles"],
+                #         "users": []
+                #     }
+                #     webhook.allowed_mentions = allowed_mentions
 
-            # Add all media files
-            for filename, file_data, file_type in media_data:
-                webhook.add_file(file=file_data, filename=filename)
+                author_icon_data, author_icon_filename, updated_title, video_uploaded, embed_media, media_data = (
+                    generate_media_webhook(title, tweet_media_list, tweet_has_video, twitter_user))
 
-            # Create embeds - one for each image to enable Discord gallery view
-            # All embeds share the same URL so Discord groups them together
-            if embed_media:
-                for idx, (filename, _, file_type) in enumerate(embed_media):
-                    # Variable check, only first embed have content, others just image and url
-                    is_first_index = idx == 0
+                # Add author icon if available
+                if author_icon_data:
+                    webhook.add_file(file=author_icon_data, filename=author_icon_filename)
+                    author_icon_url = f"attachment://{author_icon_filename}"
+                else:
+                    author_icon_url = twitter_user.icon
+
+                # Add all media files
+                for filename, file_data, file_type in media_data:
+                    webhook.add_file(file=file_data, filename=filename)
+
+                # Create embeds - one for each image to enable Discord gallery view
+                # All embeds share the same URL so Discord groups them together
+                if embed_media:
+                    for idx, (filename, _, file_type) in enumerate(embed_media):
+                        # Variable check, only first embed have content, others just image and url
+                        is_first_index = idx == 0
+                        embed = generate_embed_data(
+                            title=updated_title if is_first_index else "",  # Only first embed has title/description
+                            media_count=len(embed_media),
+                            has_video=tweet_has_video,
+                            video_uploaded=video_uploaded,
+                            timestamp=timestamp if is_first_index else None,  # Only first embed has timestamp
+                            author_name=twitter_user.name if is_first_index else None,
+                            author_url=twitter_user.link if is_first_index else None,
+                            author_icon_url=author_icon_url if is_first_index else None
+                        )
+
+                        # Set the image for this embed
+                        embed.set_image(url=f"attachment://{filename}")
+
+                        # CRITICAL: Set the same URL for all embeds so Discord groups them
+                        embed.set_url(tweet_link)
+
+                        webhook.add_embed(embed)
+                else:
+                    # No images to display (video-only or all filtered out)
                     embed = generate_embed_data(
-                        title=updated_title if is_first_index else "",  # Only first embed has title/description
-                        media_count=len(embed_media),
+                        title=updated_title,
+                        media_count=len(media_data),
                         has_video=tweet_has_video,
                         video_uploaded=video_uploaded,
-                        timestamp=timestamp if is_first_index else None,  # Only first embed has timestamp
-                        author_name=twitter_user.name if is_first_index else None,
-                        author_url=twitter_user.link if is_first_index else None,
-                        author_icon_url=author_icon_url if is_first_index else None
+                        timestamp=timestamp,
+                        author_name=twitter_user.name,
+                        author_url=twitter_user.link,
+                        author_icon_url=author_icon_url
                     )
-
-                    # Set the image for this embed
-                    embed.set_image(url=f"attachment://{filename}")
-
-                    # CRITICAL: Set the same URL for all embeds so Discord groups them
-                    embed.set_url(tweet_link)
-
                     webhook.add_embed(embed)
-            else:
-                # No images to display (video-only or all filtered out)
-                embed = generate_embed_data(
-                    title=updated_title,
-                    media_count=len(media_data),
-                    has_video=tweet_has_video,
-                    video_uploaded=video_uploaded,
-                    timestamp=timestamp,
-                    author_name=twitter_user.name,
-                    author_url=twitter_user.link,
-                    author_icon_url=author_icon_url
-                )
-                webhook.add_embed(embed)
 
             response = webhook.execute()
             if response.ok:
@@ -824,9 +844,9 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
             all_success = False
             continue
 
-    if all_success:
-        log.info(
-            f"✅ Posted tweet with {len(media_data)} media files ({len(embed_media)} in embeds) to {len(twitter_user.webhookUrl)} webhook(s)")
+        if all_success:
+            log.info(
+                f"✅ Posted tweet with {len(media_data)} media files ({len(embed_media)} in embeds) to {len(twitter_user.webhookUrl)} webhook(s)")
 
     return all_success
 

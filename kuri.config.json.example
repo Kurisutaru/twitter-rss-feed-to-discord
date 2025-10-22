@@ -3,7 +3,9 @@
     "footerTextForEmbed" : "Kurisutaru Twitter to Discord",
     "footerImageUrlForEmbed" : "https://i.imgur.com/yae4JIT.png",
     "footerColorForEmbed" : ["ffb3ba","ffdfba","ffffba","baffc9","bae1ff"],
-    "includeReTweet" : false
+    "includeReTweet" : false,
+    "generateEmbed" : true,
+    "replaceTwitterLinkInPost" : "https://fixvx.com"
   },
   "nitterServer" : ["https://nitter.d420.de"],
   "twitterWatch" : [
