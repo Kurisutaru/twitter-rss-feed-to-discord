@@ -5,8 +5,10 @@
 This project enables the pooling of data from a Twitter RSS feed sourced from a public Nitter Instance and forwards it to a Discord Webhook Embed. By utilizing this system, you can keep your Discord community updated with the latest tweets from a specific Twitter account without directly interacting with the platform.
 
 ## Changelogs
-- Now support multiple webhook and multiple user mention
-- Revamped core code (mostly taken from my other project)
+
+- [Added] Config switch to not generate My own embed implementation, also replacing the posted link into something else (like fxtwitter.com), or keep it blank if you don't want to change. 
+- Now support multiple webhook and multiple user mention.
+- Revamped core code (mostly taken from my other project).
 
 ## Table of Contents
 
@@ -16,7 +18,7 @@ This project enables the pooling of data from a Twitter RSS feed sourced from a 
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [Contributing](#contributing)
-- [License](#license)
+- [License](LICENSE)
 
 ## Introduction
 
@@ -64,15 +66,13 @@ Before running the script, you need to configure some settings:
   "twitterWatch": [
     {
       "twitterHandleName": "{Twitter Handle Name without @, e.g., @Varenchinusu becomes Varenchinusu}",
-      "webhookUrl": "https://{Discord Webhook URL}",
+      "webhookUrl": ["https://{Discord Webhook URL}"],
       "discordNotify": true,
-      "discordNotifyRoleId": "1234567890"
+      "discordNotifyRoleId": ["1234567890"]
     }
   ]
 }
 ```
-
-
 
 ## Usage
 
@@ -81,6 +81,7 @@ Once you have completed the installation and configuration, you can run the scri
 ```bash
 python kuri.py
 ```
+
 The script will start fetching tweets from the specified Twitter user's timeline RSS feed through the Nitter Instance and post them to the configured Discord Webhook. Each tweet will be displayed as an attractive Embed, providing essential information like the tweet content, date, and user details.
 
 It is recommended to automate the script execution using tools like cron (Linux) or Task Scheduler (Windows) to keep the Discord channel updated regularly.
@@ -98,4 +99,4 @@ We welcome and appreciate contributions to this project! If you want to contribu
 
 By contributing to this project, you agree to license your contributions under the same [MIT License](LICENSE) as the rest of the project.
 
-We appreciate your efforts and will review your contributions as soon as possible. Thank you for making this project better!
+I appreciate your efforts and will review your contributions as soon as possible. Thank you for making this project better!
