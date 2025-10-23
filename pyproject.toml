@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
+    "aiohttp>=3.13.1",
     "beautifulsoup4>=4.14.2",
     "discord-webhook>=1.4.1",
     "feedparser>=6.0.12",
