@@ -10,5 +10,7 @@ loguru==0.7.3
     # via twitter-rss-feed-to-discord (pyproject.toml)
 lxml==6.0.2
     # via twitter-rss-feed-to-discord (pyproject.toml)
+mashumaro==3.17
+    # via twitter-rss-feed-to-discord (pyproject.toml)
 python-dateutil==2.9.0.post0
     # via twitter-rss-feed-to-discord (pyproject.toml)

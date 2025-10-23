@@ -9,5 +9,6 @@ dependencies = [
     "feedparser>=6.0.12",
     "loguru>=0.7.3",
     "lxml>=6.0.2",
+    "mashumaro[orjson]>=3.17",
     "python-dateutil>=2.9.0.post0",
 ]

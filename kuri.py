@@ -1,7 +1,6 @@
 import atexit
 import calendar as cal
 import hashlib
-import json
 import os
 import random
 import re
@@ -22,7 +21,10 @@ import feedparser
 import requests
 from bs4 import BeautifulSoup
 from discord_webhook import DiscordEmbed, DiscordWebhook
+from feedparser import FeedParserDict
 from loguru import logger as log
+from mashumaro.mixins.json import DataClassJSONMixin
+from mashumaro.types import SerializationStrategy
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
@@ -176,80 +178,9 @@ class ScriptLock:
 # Acquire lock immediately after logging is configured, to prevent when script stuck, and it runs again and again
 lock = ScriptLock('kuri.lock')
 lock.acquire()
+
+
 # ========================
-
-# Variable
-__twitter_url: str = 'https://x.com'
-__twitter_image_card_link_template: str = 'https://pbs.twimg.com/{}{}'
-__post_video_identifier: str = 'ext_tw_video_thumb'
-__rss_template: str = '{}/{}/rss'
-
-# JSONFile
-__json_file: str = 'kuri.config.json'
-__last_run_file: str = os.path.join(script_dir, 'last_run.txt')
-
-
-# Dataclasses (replacing namedtuples)
-@dataclass
-class TwitterDbData:
-    """Configuration for a Twitter account to watch"""
-    twitterHandleName: str
-    webhookUrl: Union[str, List[str]]  # Can be single URL or list of URLs
-    discordMention: bool = False
-    discordMentionRoleId: Union[str, List[str]] = field(default_factory=list)  # Can be string or list
-
-    def __post_init__(self):
-        """Normalize webhookUrl and discordMentionRoleId to lists"""
-        # Convert single webhook URL to list
-        if isinstance(self.webhookUrl, str):
-            self.webhookUrl = [self.webhookUrl]
-
-        # Convert single role ID to list
-        if isinstance(self.discordMentionRoleId, str):
-            if self.discordMentionRoleId:  # Only if not empty string
-                self.discordMentionRoleId = [self.discordMentionRoleId]
-            else:
-                self.discordMentionRoleId = []
-        elif self.discordMentionRoleId is None:
-            self.discordMentionRoleId = []
-
-
-@dataclass
-class TwitterUser:
-    """Twitter user information for Discord embeds"""
-    name: str
-    link: str
-    icon: str
-    key: str
-    webhookUrl: list  # Changed to list to support multiple webhooks
-    discordMention: bool
-    discordMentionRoleId: list[str]  # Changed to list to support multiple role mentions
-
-
-@dataclass
-class EntryData:
-    """Parsed tweet data"""
-    title: str
-    description: str
-    link: str
-    pubdate: datetime
-    timestamp: float
-    key: str
-    mediaList: List['TwitterMedia'] = field(default_factory=list)
-    hasVideo: bool = False
-
-    def is_retweet(self) -> bool:
-        """Check if this is a retweet"""
-        return "RT by" in self.title or self.title.startswith('R to @')
-
-    @property
-    def clean_title(self) -> str:
-        """Get cleaned tweet title"""
-        return re.sub(r'^R to @\w+:\s*', '', self.title)
-
-
-twitter_pull_rss_data_list: List[TwitterDbData] = []
-twitter_user_list: List[TwitterUser] = []
 
 
 # ===== OPTIMIZED HTTP SESSION =====
@@ -294,6 +225,88 @@ def cleanup_http_session():
 
 atexit.register(cleanup_http_session)
 
+# Variable
+__twitter_url: str = 'https://x.com'
+__twitter_image_card_link_template: str = 'https://pbs.twimg.com/{}{}'
+__post_video_identifier: str = 'ext_tw_video_thumb'
+__rss_template: str = '{}/{}/rss'
+
+# JSONFile
+__json_file: str = 'kuri.config.json'
+__last_run_file: str = os.path.join(script_dir, 'last_run.txt')
+
+
+# Dataclasses
+@dataclass
+class TwitterUser:
+    """Twitter user information for Discord embeds"""
+    name: str
+    link: str
+    icon: str
+    key: str
+    webhookUrl: list[str]
+    discordMention: bool
+    discordMentionRoleId: list[str]
+
+
+@dataclass
+class EntryData:
+    """Parsed tweet data"""
+    title: str
+    description: str
+    link: str
+    pubdate: datetime
+    timestamp: float
+    key: str
+    mediaList: List['TwitterMedia'] = field(default_factory=list)
+    hasVideo: bool = False
+
+    def is_retweet(self) -> bool:
+        """Check if this is a retweet"""
+        return "RT by" in self.title or self.title.startswith('R to @')
+
+    @property
+    def clean_title(self) -> str:
+        """Get cleaned tweet title"""
+        return re.sub(r'^R to @\w+:\s*', '', self.title)
+
+
+@dataclass
+class Config:
+    footerTextForEmbed: str
+    footerImageUrlForEmbed: str
+    footerColorForEmbed: list[str]
+    includeReTweet: bool
+    generateEmbed: bool
+    replaceTwitterLinkInPost: str
+
+
+@dataclass
+class TwitterWatch:
+    twitterHandleName: str
+    webhookUrl: list[str] = field(default_factory=list)
+    discordMention: bool = False
+    discordMentionRoleId: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TwitterDiscordConfig(DataClassJSONMixin):
+    config: Config
+    nitterServer: list[str]
+    twitterWatch: list[TwitterWatch]
+
+
+# Check if config file exist, if not abort
+if not isfile(__json_file):
+    log.error("Config file not found, abort current running script")
+    exit(1)
+
+with open(__json_file, 'r') as f:
+    mainConfig = TwitterDiscordConfig.from_json(f.read())
+
+twitter_user_list: List[TwitterUser] = []
+
+
 def read_last_run(filename: str = __last_run_file) -> datetime:
     """Read the last processed tweet timestamp from file."""
     try:
@@ -330,34 +343,6 @@ def write_last_run(timestamp: datetime, filename: str = __last_run_file):
         log.info(f"Updated last processed tweet timestamp: {timestamp} (UTC)")
     except Exception as write_error:
         log.error(f"Error writing last run timestamp: {write_error}")
-
-
-# Check if config file exist, if not abort
-if not isfile(__json_file):
-    log.error("Config file not found, abort current running script")
-    exit(1)
-
-with open(__json_file, 'r', encoding='UTF-8') as jsonFile:
-    jsonConfig = json.load(jsonFile)
-
-__nitter_url = jsonConfig['nitterServer']
-__footer_embed_text = jsonConfig['config']['footerTextForEmbed']
-__footer_embed_image_url = jsonConfig['config']['footerImageUrlForEmbed']
-__twitter_embed_color = jsonConfig['config']['footerColorForEmbed']
-__include_re_tweet = jsonConfig['config']['includeReTweet']
-__generate_embed = jsonConfig['config']['generateEmbed']
-__replace_twitter_link_in_post = jsonConfig['config']['replaceTwitterLinkInPost']
-
-for item in jsonConfig['twitterWatch']:
-    if item.get('twitterHandleName') and item.get('webhookUrl'):
-        twitter_pull_rss_data_list.append(
-            TwitterDbData(
-                twitterHandleName=item['twitterHandleName'],
-                webhookUrl=item['webhookUrl'],  # Can be string or list
-                discordMention=item.get('discordMention', False),
-                discordMentionRoleId=item.get('discordMentionRoleId', [])  # Can be string, list, or empty
-            )
-        )
 
 
 def generate_rss_url(twitter_handle_name: str, nitter_url: str) -> str:
@@ -424,7 +409,7 @@ def normalize_datetime_to_utc_naive(dt: datetime) -> datetime:
         return dt
 
 
-def generate_twitter_user_from_rss(feed_data: feedparser, key: str, webhook_url: list[str], discord_mention: bool,
+def generate_twitter_user_from_rss(feed_data: FeedParserDict, key: str, webhook_url: list[str], discord_mention: bool,
                                    discord_mention_role_id: list[str]) -> TwitterUser:
     """Create TwitterUser object from RSS feed data"""
     return TwitterUser(
@@ -544,7 +529,7 @@ def clean_tweet_text(title: str) -> str:
 
 def generate_embed_color() -> str:
     """Get random embed color from config"""
-    return random.choice(__twitter_embed_color)
+    return random.choice(mainConfig.config.footerColorForEmbed)
 
 
 def generate_embed_data(title: str, media_count: int, has_video: bool, video_uploaded: bool,
@@ -570,7 +555,7 @@ def generate_embed_data(title: str, media_count: int, has_video: bool, video_upl
 
     # set footer (only on first embed)
     if author_name:  # Using author_name as proxy for "is first embed"
-        embed.set_footer(text=__footer_embed_text, icon_url=__footer_embed_image_url)
+        embed.set_footer(text=mainConfig.config.footerTextForEmbed, icon_url=mainConfig.config.footerImageUrlForEmbed)
 
     # set timestamp (only if provided)
     if timestamp:
@@ -594,8 +579,10 @@ def generate_embed_data(title: str, media_count: int, has_video: bool, video_upl
 
     return embed
 
+
 # Consolidate for generate media thingy, so it will be on one block, not separate like previous due the switch
-def generate_media_webhook(title: str, tweet_media_list: List[TwitterMedia], tweet_has_video: bool, twitter_user: TwitterUser) -> \
+def generate_media_webhook(title: str, tweet_media_list: List[TwitterMedia], tweet_has_video: bool,
+                           twitter_user: TwitterUser) -> \
         tuple[bytes | None | Any, str | None, str, bool, list[Any], list[Any]]:
     # Discord file size limits (in bytes)
     max_file_size = 25 * 1024 * 1024  # 25MB for regular servers
@@ -744,8 +731,8 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
 
     # Replace twitter link with let say fixupx.com or something for better embed, if on config were empty, then no replace
     content = tweet_link
-    if __replace_twitter_link_in_post:
-        content = content.replace(__twitter_url, __replace_twitter_link_in_post)
+    if mainConfig.config.replaceTwitterLinkInPost:
+        content = content.replace(__twitter_url, mainConfig.config.replaceTwitterLinkInPost)
 
     # Build base content with role mentions
     if twitter_user.discordMention and twitter_user.discordMentionRoleId:
@@ -765,7 +752,7 @@ def send_to_discord_with_media(tweet_link: str, title: str, tweet_media_list: Li
             embed_media = []
 
             # Adding switch to generate embed
-            if __generate_embed:
+            if mainConfig.config.generateEmbed:
                 # I just realize you need this ? I thought just <@ already enough
                 # That's why sometimes it's not having pinging sound
                 # Can be improved if needed, ping user perhaps, for now just Role
@@ -858,9 +845,9 @@ try:
 
     # Collect entry data
     entryData: List[EntryData] = []
-    nitterServerDistributionList = random.choices(__nitter_url, k=len(twitter_pull_rss_data_list))
+    nitterServerDistributionList = random.choices(mainConfig.nitterServer, k=len(mainConfig.twitterWatch))
 
-    for item, nitter in zip(twitter_pull_rss_data_list, nitterServerDistributionList):
+    for item, nitter in zip(mainConfig.twitterWatch, nitterServerDistributionList):
         try:
             feedParse = feedparser.parse(generate_rss_url(item.twitterHandleName, nitter))
 
@@ -922,7 +909,7 @@ try:
 
                 # Filter retweets using the method
                 if tempData.is_retweet():
-                    if __include_re_tweet:
+                    if mainConfig.config.includeReTweet:
                         entryData.append(tempData)
                         log.debug(f"Including retweet from {pub_date}")
                 else:
@@ -968,7 +955,7 @@ try:
 
             # There's no hardcoded limit though, and I already put the retry on the webhook itself
             # So it safe to reduce to small amount I guess ?
-            time.sleep(0.2)
+            time.sleep(0.1)
 
         except Exception as post_error:
             log.error(f"Error posting to Discord: {post_error}")

@@ -11,9 +11,9 @@
   "twitterWatch" : [
     {
       "twitterHandleName" : "priconne_redive",
-      "webhookUrl" : "",
+      "webhookUrl" : ["", ""],
       "discordMention" : true,
-      "discordMentionRoleId" : "1234567890"
+      "discordMentionRoleId" : ["1234567890", "0987654321"]
     },
     {
       "twitterHandleName" : "priconne_redive",
