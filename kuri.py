@@ -262,6 +262,10 @@ def write_last_run(timestamp: datetime, filename: str = __last_run_file):
         log.error(f"Error writing last run timestamp: {write_error}")
 
 
+def convert_mb_to_bytes(input_mb: int) -> int:
+    return input_mb * 1024 * 1024
+
+
 def generate_rss_url(twitter_handle_name: str, nitter_url: str) -> str:
     """Generate RSS feed URL for a Twitter user"""
     return __rss_template.format(nitter_url, twitter_handle_name)
@@ -507,7 +511,7 @@ async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url
     rss_url = generate_rss_url(twitter_handle, nitter_url)
     try:
         async with session.get(rss_url, timeout=ClientTimeout(total=30)) as response:
-            if response.status == 200:
+            if response.ok:
                 content = await response.text()
                 # feedparser is synchronous but fast, so it's acceptable
                 feed = feedparser.parse(content)
@@ -523,11 +527,11 @@ async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url
         return None
 
 
-async def download_media(session: ClientSession, url: str, max_size: int = 25 * 1024 * 1024) -> Optional[bytes]:
+async def download_media(session: ClientSession, url: str, max_size: int = convert_mb_to_bytes(25)) -> Optional[bytes]:
     """Download media file asynchronously with size limit"""
     try:
         async with session.get(url, timeout=ClientTimeout(total=30)) as response:
-            if response.status == 200:
+            if response.ok:
                 content = await response.read()
                 if len(content) > max_size:
                     log.warning(f"Media too large ({len(content) / 1024 / 1024:.2f}MB): {url}")
@@ -544,11 +548,45 @@ async def download_media(session: ClientSession, url: str, max_size: int = 25 * 
         return None
 
 
-async def generate_media_webhook(session: ClientSession, title: str, tweet_media_list: List[TwitterMedia],
+async def fetch_video_from_fxtwitter(session: ClientSession, tweet_link: str) -> Optional[str]:
+    """Fetch video URL from fxtwitter meta tags"""
+    if not mainConfig.config.useFxTwitter:
+        return None
+
+    fx_url = tweet_link.replace(__twitter_url, __fxtwitter_url)
+
+    try:
+        log.info(f"Fetching video from fxtwitter: {fx_url}")
+        async with session.get(fx_url, timeout=ClientTimeout(total=60)) as response:
+            if response.ok:
+                html = await response.text()
+                soup = BeautifulSoup(html, 'html.parser')
+
+                # Try multiple meta tags in priority order
+                for tag in ['twitter:player:stream', 'og:video:secure_url', 'html.parser']:
+                    meta = soup.find('meta', property=tag)
+                    if meta and meta.get('content'):
+                        video_url = meta.get('content')
+                        log.info(f"✅ Found video URL from {tag}: {video_url}")
+                        return video_url
+
+                log.warning(f"No video meta tags found in {fx_url}")
+                return None
+            else:
+                log.warning(f"Failed to fetch fxtwitter page: HTTP {response.status}")
+                return None
+    except asyncio.TimeoutError:
+        log.error(f"Timeout fetching fxtwitter page: {fx_url}")
+        return None
+    except Exception as e:
+        log.error(f"Error fetching video from fxtwitter: {e}")
+        return None
+
+
+async def generate_media_webhook(session: ClientSession, tweet_link:str, title: str, tweet_media_list: List[TwitterMedia],
                                  tweet_has_video: bool, twitter_user: TwitterUser) -> tuple:
     """Generate media webhook data with async downloads - ALL downloads happen concurrently"""
-    max_file_size = 25 * 1024 * 1024
-    max_video_size = 10 * 1024 * 1024
+    max_file_size = convert_mb_to_bytes(10)
 
     author_icon_data = None
     author_icon_filename = None
@@ -561,6 +599,15 @@ async def generate_media_webhook(session: ClientSession, title: str, tweet_media
     video_thumbnails = [m for m in tweet_media_list if m.type == 'video_thumbnail']
     images = [m for m in tweet_media_list if m.type == 'image']
 
+    # Check if we need to fetch video from fxtwitter
+    if tweet_has_video and not videos:
+        log.info("🎥 Video thumbnail detected but no video in RSS - trying fxtwitter...")
+        video_url = await fetch_video_from_fxtwitter(session, tweet_link)
+        if video_url:
+            log.info(f"✅ Got video URL from fxtwitter, will use embed.set_video()")
+        else:
+            log.warning("❌ Failed to get video from fxtwitter, will use thumbnails")
+
     # ===== DOWNLOAD EVERYTHING CONCURRENTLY =====
     download_tasks = []
     task_metadata = []  # Track what each task is for
@@ -568,7 +615,7 @@ async def generate_media_webhook(session: ClientSession, title: str, tweet_media
     # Task 0: Author icon (if exists)
     if twitter_user.icon:
         log.info(f"Queueing author icon download: {twitter_user.icon}")
-        download_tasks.append(download_media(session, twitter_user.icon, max_size=5 * 1024 * 1024))
+        download_tasks.append(download_media(session, twitter_user.icon, max_size=convert_mb_to_bytes(5)))
         task_metadata.append(('author_icon', twitter_user.icon, None))
 
     # Tasks 1+: Videos
@@ -695,7 +742,7 @@ async def send_to_discord_with_media(session: ClientSession, tweet_link: str, em
 
             if mainConfig.config.generateEmbed:
                 author_icon_data, author_icon_filename, updated_title, video_uploaded, embed_media, media_data = (
-                    await generate_media_webhook(session, embed_title, tweet_media_list, tweet_has_video, twitter_user))
+                    await generate_media_webhook(session, tweet_link, embed_title, tweet_media_list, tweet_has_video, twitter_user))
 
                 if author_icon_data:
                     webhook.add_file(file=author_icon_data, filename=author_icon_filename)
@@ -773,7 +820,8 @@ async def main():
                 connector=connector,
                 timeout=timeout,
                 headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'User-Agent': 'curl/8.16.0',
+                    # needed fetch_video_from_fxtwitter, if i put browser agent, it just redirect
                     'Accept-Encoding': 'gzip, deflate',
                     'Connection': 'keep-alive',
                 }
