@@ -4,7 +4,7 @@
     "embedFooterImageUrl" : "https://i.imgur.com/yae4JIT.png",
     "includeReTweet" : false,
     "generateEmbed" : true,
-    "replaceTwitterLinkInPost" : "https://fixvx.com"
+    "useFxTwitter" : false
   },
   "nitterServer" : ["https://nitter.d420.de"],
   "twitterWatch" : [

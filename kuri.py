@@ -23,6 +23,7 @@ from bs4 import BeautifulSoup
 from discord_webhook import DiscordEmbed, DiscordWebhook
 from feedparser import FeedParserDict
 from loguru import logger as log
+from markdownify import markdownify as md
 from mashumaro.mixins.json import DataClassJSONMixin
 
 # Get the directory where the script is located
@@ -143,6 +144,7 @@ lock.acquire()
 
 # Variable
 __twitter_url: str = 'https://x.com'
+__fxtwitter_url: str = 'https://fxtwitter.com'
 __twitter_image_card_link_template: str = 'https://pbs.twimg.com/{}{}'
 __post_video_identifier: str = 'ext_tw_video_thumb'
 __rss_template: str = '{}/{}/rss'
@@ -193,7 +195,7 @@ class Config:
     embedFooterImageUrl: str
     includeReTweet: bool
     generateEmbed: bool
-    replaceTwitterLinkInPost: str
+    useFxTwitter: bool
 
 
 @dataclass
@@ -409,6 +411,58 @@ def clean_tweet_text(title: str) -> str:
     return text
 
 
+def clean_tweet_description(html_content: str) -> str:
+    """
+    Clean tweet description by:
+    1. Removing images and videos
+    2. Converting links to Discord markdown format
+    3. Replacing nitter URLs with x.com
+    4. Showing full URLs without protocol ONLY for truncated links (containing ...)
+    5. Keeping hashtag and mention links with their original text
+    """
+    soup = BeautifulSoup(html_content, 'lxml')
+
+    # Remove images and videos first
+    for tag in soup.find_all(['img', 'video', 'source']):
+        tag.decompose()
+
+    # Replace nitter URLs with x.com
+    list_server = mainConfig.nitterServer
+    list_server.append('http://nitter.net')
+
+    # Process all links
+    for link in soup.find_all('a'):
+        href = link.get('href', '')
+        link_text = replace_nitter_url_to_twitter_url(link.get_text(), __twitter_url, list_server)
+
+        if not href:
+            continue
+
+        # Replace nitter URL to twitter URL
+        href = replace_nitter_url_to_twitter_url(href, __twitter_url, list_server)
+
+        # Determine display text
+        # Only replace with full URL if the link text contains ellipsis (...)
+        if '…' in link_text or '...' in link_text:
+            # Show full URL without protocol
+            display_text = href.replace('https://', '').replace('http://', '')
+        else:
+            # Keep original text (for hashtags, mentions, etc)
+            display_text = link_text
+
+        # Replace the link with Discord markdown format
+        link.replace_with(f'[{display_text}]({href})')
+
+    # Convert <br> to newlines
+    for br in soup.find_all('br'):
+        br.replace_with('\n')
+
+    # Convert to markdown automatically
+    markdown = md(str(soup), heading_style="ATX", escape_underscores=False)
+
+    return markdown.strip()
+
+
 def generate_embed_color() -> int:
     # Generate a random integer between 0 and 0xFFFFFF
     random_color = random.randint(0, 0xFFFFFF)
@@ -491,7 +545,7 @@ async def download_media(session: ClientSession, url: str, max_size: int = 25 * 
 
 
 async def generate_media_webhook(session: ClientSession, title: str, tweet_media_list: List[TwitterMedia],
-                                       tweet_has_video: bool, twitter_user: TwitterUser) -> tuple:
+                                 tweet_has_video: bool, twitter_user: TwitterUser) -> tuple:
     """Generate media webhook data with async downloads - ALL downloads happen concurrently"""
     max_file_size = 25 * 1024 * 1024
     max_video_size = 10 * 1024 * 1024
@@ -500,7 +554,7 @@ async def generate_media_webhook(session: ClientSession, title: str, tweet_media
     author_icon_filename = None
     embed_media = []
     media_data = []
-    updated_title = title
+    updated_title = clean_tweet_description(title)
 
     # Separate media by type
     videos = [m for m in tweet_media_list if m.type == 'video']
@@ -620,13 +674,13 @@ async def generate_media_webhook(session: ClientSession, title: str, tweet_media
     return author_icon_data, author_icon_filename, updated_title, video_uploaded, embed_media, media_data
 
 
-async def send_to_discord_with_media(session: ClientSession, tweet_link: str, title: str,
+async def send_to_discord_with_media(session: ClientSession, tweet_link: str, embed_title: str,
                                      tweet_media_list: List[TwitterMedia], tweet_has_video: bool,
                                      timestamp: float, twitter_user: TwitterUser) -> bool:
     """Send tweet to Discord with media uploaded as attachments (async)."""
     content = tweet_link
-    if mainConfig.config.replaceTwitterLinkInPost:
-        content = content.replace(__twitter_url, mainConfig.config.replaceTwitterLinkInPost)
+    if mainConfig.config.useFxTwitter:
+        content = content.replace(__twitter_url, __fxtwitter_url)
 
     if twitter_user.discordMention and twitter_user.discordMentionRoleId:
         mentions = ' '.join([f'<@&{role_id}>' for role_id in twitter_user.discordMentionRoleId])
@@ -641,7 +695,7 @@ async def send_to_discord_with_media(session: ClientSession, tweet_link: str, ti
 
             if mainConfig.config.generateEmbed:
                 author_icon_data, author_icon_filename, updated_title, video_uploaded, embed_media, media_data = (
-                    await generate_media_webhook(session, title, tweet_media_list, tweet_has_video, twitter_user))
+                    await generate_media_webhook(session, embed_title, tweet_media_list, tweet_has_video, twitter_user))
 
                 if author_icon_data:
                     webhook.add_file(file=author_icon_data, filename=author_icon_filename)
@@ -823,7 +877,7 @@ async def main():
                     success = await send_to_discord_with_media(
                         session=session,
                         tweet_link=data.link,
-                        title=data.title,
+                        embed_title=data.title,
                         tweet_media_list=data.mediaList,
                         tweet_has_video=data.hasVideo,
                         timestamp=data.timestamp,
