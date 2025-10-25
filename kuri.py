@@ -10,6 +10,7 @@ import sys
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from operator import attrgetter
 from os.path import isfile
 from pathlib import Path
@@ -23,7 +24,6 @@ from bs4 import BeautifulSoup
 from discord_webhook import DiscordEmbed, DiscordWebhook
 from feedparser import FeedParserDict
 from loguru import logger as log
-from markdownify import markdownify as md
 from mashumaro.mixins.json import DataClassJSONMixin
 
 # Get the directory where the script is located
@@ -71,8 +71,8 @@ class ScriptLock:
         """Acquire the lock. If another instance is running, exit."""
         if os.path.exists(self.lock_file):
             try:
-                with open(self.lock_file, 'r') as f:
-                    old_pid = int(f.read().strip())
+                with open(self.lock_file, 'r') as file:
+                    old_pid = int(file.read().strip())
 
                 if self._is_process_running(old_pid):
                     self.log.warning(f"Script is already running (PID: {old_pid}). Exiting.")
@@ -85,8 +85,8 @@ class ScriptLock:
                 os.remove(self.lock_file)
 
         try:
-            with open(self.lock_file, 'w') as f:
-                f.write(str(os.getpid()))
+            with open(self.lock_file, 'w') as file:
+                file.write(str(os.getpid()))
             self.locked = True
             self.log.info(f"Lock acquired (PID: {os.getpid()})")
 
@@ -148,6 +148,10 @@ __fxtwitter_url: str = 'https://fxtwitter.com'
 __twitter_image_card_link_template: str = 'https://pbs.twimg.com/{}{}'
 __post_video_identifier: str = 'ext_tw_video_thumb'
 __rss_template: str = '{}/{}/rss'
+__video_embed_content: str = '▶️[\u2800]({})'
+__footer_append_template: str = ' • {}'
+__emoji_video = '🎬'
+__emoji_photo = '🖼️'
 
 # JSONFile
 __json_file: str = 'kuri.config.json'
@@ -195,7 +199,7 @@ class Config:
     embedFooterImageUrl: str
     includeReTweet: bool
     generateEmbed: bool
-    useFxTwitter: bool
+    useFxTwitterLinkInDiscord: bool
 
 
 @dataclass
@@ -220,13 +224,80 @@ class TwitterMedia:
     type: str  # 'image', 'video', or 'video_thumbnail'
 
 
+class MediaType(Enum):
+    """Strong typing for media types"""
+    IMAGE = "image"
+    VIDEO_URL = "video_url"  # URL to video (from fxtwitter)
+    VIDEO_THUMBNAIL = "video_thumbnail"
+    AUTHOR_ICON = "author_icon"
+
+
+@dataclass
+class DownloadedMedia:
+    """Represents downloaded media with proper typing"""
+    filename: str
+    data: bytes
+    media_type: MediaType
+    original_url: str
+
+
+@dataclass
+class VideoEmbed:
+    """Represents a video to be embedded (URL only, not downloaded)"""
+    url: str
+    filename: str
+
+
+@dataclass
+class WebhookMediaPayload:
+    """Complete payload for webhook with proper separation of concerns"""
+    # Author info
+    author_icon_data: Optional[bytes] = None
+    author_icon_filename: Optional[str] = None
+
+    # Videos (URLs only, sent first)
+    videos: List[VideoEmbed] = None
+
+    # Images to attach and embed
+    images: List[DownloadedMedia] = None
+
+    # All attachments (images + author icon)
+    all_attachments: List[DownloadedMedia] = None
+
+    # Metadata
+    cleaned_description: str = ""
+    video_uploaded: bool = False
+
+    def __post_init__(self):
+        if self.videos is None:
+            self.videos = []
+        if self.images is None:
+            self.images = []
+        if self.all_attachments is None:
+            self.all_attachments = []
+
+    @property
+    def image_count(self) -> int:
+        return len(self.images)
+
+    @property
+    def video_count(self) -> int:
+        return len(self.videos)
+
+    @property
+    def total_media_count(self) -> int:
+        return self.image_count + self.video_count
+
+
 # Check if config file exist, if not abort
 if not isfile(__json_file):
     log.error("Config file not found, abort current running script")
     exit(1)
 
 with open(__json_file, 'r') as f:
-    mainConfig = TwitterDiscordConfig.from_json(f.read())
+    main_config = TwitterDiscordConfig.from_json(f.read())
+
+nitter_url: list[str] = [*main_config.nitterServer, 'http://nitter.net']
 
 
 def read_last_run(filename: str = __last_run_file) -> datetime:
@@ -266,6 +337,10 @@ def convert_mb_to_bytes(input_mb: int) -> int:
     return input_mb * 1024 * 1024
 
 
+def get_filename_from_url(url: str) -> str:
+    return os.path.basename(urlparse(url).path)
+
+
 def generate_rss_url(twitter_handle_name: str, nitter_url: str) -> str:
     """Generate RSS feed URL for a Twitter user"""
     return __rss_template.format(nitter_url, twitter_handle_name)
@@ -277,12 +352,46 @@ def replace_url_to_twitter(input_string: str, twitter_url: str) -> str:
     return return_string
 
 
-def replace_nitter_url_to_twitter_url(input_string: str, twitter_url: str, nitter_url: list[str]) -> str:
+def replace_nitter_url_to_twitter_url(input_string: str) -> str:
     """Replace nitter domain with Twitter domain"""
-    return_string = input_string.replace('http://', 'https://').replace('#m', '')
+    return_string = unquote(input_string)
+    return_string = return_string.replace('http://', 'https://').replace('#m', '')
     for serv in nitter_url:
-        return_string = return_string.replace(urlparse(serv).netloc, urlparse(twitter_url).netloc)
+        return_string = return_string.replace(urlparse(serv).netloc, urlparse(__twitter_url).netloc)
     return return_string
+
+
+def extract_video_url_from_nitter(nitter_video_url: str) -> str:
+    """
+    Extract actual Twitter video URL from nitter's /pic/ wrapper.
+
+    Input: http://nitter.net/pic/video.twimg.com%2Ftweet_video%2Ffile.mp4
+    Output: https://video.twimg.com/tweet_video/file.mp4
+    """
+    # Unquote first
+    unquoted = unquote(nitter_video_url)
+
+    # Extract the actual video.twimg.com URL from the path
+    # Pattern: /pic/{actual_video_url}
+    match = re.search(r'/pic/(.+)', unquoted)
+    if match:
+        actual_url = match.group(1)
+        # Ensure https protocol
+        if not actual_url.startswith('http'):
+            actual_url = f'https://{actual_url}'
+        return actual_url.replace('http://', 'https://')
+
+    # Fallback: try to clean it manually
+    cleaned = unquoted.replace('http://', 'https://').replace('/pic/', '')
+
+    # Remove nitter domains
+    for domain in nitter_url:
+        cleaned = cleaned.replace(domain, '')
+
+    # Clean up any double slashes (except after https:)
+    cleaned = re.sub(r'(?<!:)//+', '/', cleaned)
+
+    return cleaned
 
 
 def generate_twitter_embed_name(input_string: str) -> str:
@@ -385,7 +494,9 @@ def extract_media_from_description(description: str, twitter_card_template: str)
             source = video.find('source')
             if source and source.get('src'):
                 video_url = source.get('src')
-                twitter_video_url = video_url.replace('http://', 'https://')
+
+                # Use new function to properly extract video URL
+                twitter_video_url = extract_video_url_from_nitter(video_url)
                 extracted_media_list.append(TwitterMedia(url=twitter_video_url, type='video'))
 
             poster = video.get('poster', '')
@@ -419,7 +530,7 @@ def clean_tweet_description(html_content: str) -> str:
     """
     Clean tweet description by:
     1. Removing images and videos
-    2. Converting links to Discord markdown format
+    2. Converting links to Discord Markdown format
     3. Replacing nitter URLs with x.com
     4. Showing full URLs without protocol ONLY for truncated links (containing ...)
     5. Keeping hashtag and mention links with their original text
@@ -430,20 +541,20 @@ def clean_tweet_description(html_content: str) -> str:
     for tag in soup.find_all(['img', 'video', 'source']):
         tag.decompose()
 
-    # Replace nitter URLs with x.com
-    list_server = mainConfig.nitterServer
-    list_server.append('http://nitter.net')
-
     # Process all links
     for link in soup.find_all('a'):
         href = link.get('href', '')
-        link_text = replace_nitter_url_to_twitter_url(link.get_text(), __twitter_url, list_server)
+        link_text = replace_nitter_url_to_twitter_url(link.get_text())
 
         if not href:
             continue
 
+        # Skip hashtag links - we'll handle them separately
+        if link_text.startswith('#'):
+            continue
+
         # Replace nitter URL to twitter URL
-        href = replace_nitter_url_to_twitter_url(href, __twitter_url, list_server)
+        href = replace_nitter_url_to_twitter_url(href)
 
         # Determine display text
         # Only replace with full URL if the link text contains ellipsis (...)
@@ -451,20 +562,45 @@ def clean_tweet_description(html_content: str) -> str:
             # Show full URL without protocol
             display_text = href.replace('https://', '').replace('http://', '')
         else:
-            # Keep original text (for hashtags, mentions, etc)
+            # Keep original text (for hashtags, mentions, etc.)
             display_text = link_text
 
-        # Replace the link with Discord markdown format
+        # Replace the link with Discord Markdown format
         link.replace_with(f'[{display_text}]({href})')
 
     # Convert <br> to newlines
-    for br in soup.find_all('br'):
-        br.replace_with('\n')
+    # for br in soup.find_all('br'):
+    #     br.replace_with('\n')
 
-    # Convert to markdown automatically
-    markdown = md(str(soup), heading_style="ATX", escape_underscores=False)
+    # Remove all remaining hashtag links (we'll recreate them)
+    for link in soup.find_all('a'):
+        link_text = link.get_text()
+        if link_text.startswith('#'):
+            link.replace_with(link_text)  # Replace with just the text
 
-    return markdown.strip()
+    # Get text directly - this preserves all newlines
+    text = soup.get_text()
+
+    # Convert standalone hashtags (not already in links) to clickable links
+    import re
+    from urllib.parse import quote
+
+    def replace_hashtag(match):
+        hashtag_with_hash = match.group(0)  # e.g., #Trickcal or #トリッカル
+        hashtag_without_hash = hashtag_with_hash[1:]  # Remove the #
+        # URL encode the hashtag text
+        encoded = quote(hashtag_without_hash)
+        return f'[{hashtag_with_hash}](https://x.com/hashtag/{encoded})'
+
+    # Match hashtags that are NOT already inside Markdown links
+    # Negative lookbehind: (?<!\[) - not preceded by [
+    # Negative lookahead: (?!\]\() - not followed by ](
+    # Match: # followed by word characters (including Unicode)
+    hashtag_pattern = r'(?<!\[)#\w+(?!\]\()'
+    text = re.sub(hashtag_pattern, replace_hashtag, text)
+
+    # Strip only leading/trailing whitespace, preserve internal newlines
+    return text.strip()
 
 
 def generate_embed_color() -> int:
@@ -473,7 +609,7 @@ def generate_embed_color() -> int:
     return random_color
 
 
-def generate_embed_data(title: str, media_count: int, has_video: bool, video_uploaded: bool,
+def generate_embed_data(title: str, payload: WebhookMediaPayload,
                         timestamp: float, author_name: str = None, author_url: str = None,
                         author_icon_url: str = None) -> DiscordEmbed:
     """Create embed object for webhook."""
@@ -486,22 +622,20 @@ def generate_embed_data(title: str, media_count: int, has_video: bool, video_upl
 
     embed.set_color(generate_embed_color())
 
-    if author_name:
-        embed.set_footer(text=mainConfig.config.embedFooterText, icon_url=mainConfig.config.embedFooterImageUrl)
-
     if timestamp:
         embed.set_timestamp(timestamp)
 
     if title:
-        post_data = clean_tweet_text(title)
+        embed.set_description(clean_tweet_text(title))
 
-        if has_video and video_uploaded:
-            post_data = f'{post_data}\n\n🎥 *[tweet has video]*'
+    footer = main_config.config.embedFooterText
 
-        if media_count > 1:
-            post_data = f'{post_data}\n\n🔎 *Contains {media_count} media files*'
+    if payload.image_count > 0:
+        footer += __footer_append_template.format(f"{payload.image_count}{__emoji_photo}")
+    if payload.video_count > 0:
+        footer += __footer_append_template.format(f"{payload.video_count}{__emoji_video}")
 
-        embed.set_description(post_data)
+    embed.set_footer(text=footer, icon_url=main_config.config.embedFooterImageUrl)
 
     return embed
 
@@ -550,9 +684,6 @@ async def download_media(session: ClientSession, url: str, max_size: int = conve
 
 async def fetch_video_from_fxtwitter(session: ClientSession, tweet_link: str) -> Optional[str]:
     """Fetch video URL from fxtwitter meta tags"""
-    if not mainConfig.config.useFxTwitter:
-        return None
-
     fx_url = tweet_link.replace(__twitter_url, __fxtwitter_url)
 
     try:
@@ -560,10 +691,10 @@ async def fetch_video_from_fxtwitter(session: ClientSession, tweet_link: str) ->
         async with session.get(fx_url, timeout=ClientTimeout(total=60)) as response:
             if response.ok:
                 html = await response.text()
-                soup = BeautifulSoup(html, 'html.parser')
+                soup = BeautifulSoup(html, 'lxml')
 
                 # Try multiple meta tags in priority order
-                for tag in ['twitter:player:stream', 'og:video:secure_url', 'html.parser']:
+                for tag in ['twitter:player:stream', 'og:video:secure_url', 'og:video']:
                     meta = soup.find('meta', property=tag)
                     if meta and meta.get('content'):
                         video_url = meta.get('content')
@@ -583,150 +714,144 @@ async def fetch_video_from_fxtwitter(session: ClientSession, tweet_link: str) ->
         return None
 
 
-async def generate_media_webhook(session: ClientSession, tweet_link:str, title: str, tweet_media_list: List[TwitterMedia],
-                                 tweet_has_video: bool, twitter_user: TwitterUser) -> tuple:
-    """Generate media webhook data with async downloads - ALL downloads happen concurrently"""
+async def generate_media_webhook(
+        session: ClientSession,
+        tweet_link: str,
+        title: str,
+        tweet_media_list: List[TwitterMedia],
+        tweet_has_video: bool,
+        twitter_user: TwitterUser
+) -> WebhookMediaPayload:
+    """
+    Generate media webhook data with async downloads.
+    Returns strongly-typed payload with clear separation between videos and images.
+    """
     max_file_size = convert_mb_to_bytes(10)
+    payload = WebhookMediaPayload()
 
-    author_icon_data = None
-    author_icon_filename = None
-    embed_media = []
-    media_data = []
-    updated_title = clean_tweet_description(title)
+    # Clean description first
+    payload.cleaned_description = clean_tweet_description(title)
 
     # Separate media by type
-    videos = [m for m in tweet_media_list if m.type == 'video']
+    videos_from_rss = [m for m in tweet_media_list if m.type == 'video']
     video_thumbnails = [m for m in tweet_media_list if m.type == 'video_thumbnail']
     images = [m for m in tweet_media_list if m.type == 'image']
 
-    # Check if we need to fetch video from fxtwitter
-    if tweet_has_video and not videos:
-        log.info("🎥 Video thumbnail detected but no video in RSS - trying fxtwitter...")
-        video_url = await fetch_video_from_fxtwitter(session, tweet_link)
-        if video_url:
-            log.info(f"✅ Got video URL from fxtwitter, will use embed.set_video()")
+    # === VIDEO HANDLING ===
+    video_url = None
+
+    if tweet_has_video:
+        if videos_from_rss:
+            # Use video from RSS
+            video_url = videos_from_rss[0].url
+            log.info(f"Using video URL from RSS: {video_url}")
         else:
-            log.warning("❌ Failed to get video from fxtwitter, will use thumbnails")
+            # Fetch from fxtwitter
+            log.info("🎥 Getting video link from fxtwitter...")
+            video_url = await fetch_video_from_fxtwitter(session, tweet_link)
 
-    # ===== DOWNLOAD EVERYTHING CONCURRENTLY =====
+            if video_url:
+                log.info(f"✅ Got video URL from fxtwitter")
+            else:
+                log.warning("❌ Failed to get video from fxtwitter, will use thumbnails")
+
+        if video_url:
+            payload.videos.append(VideoEmbed(
+                url=video_url,
+                filename=get_filename_from_url(video_url)
+            ))
+            payload.video_uploaded = True
+
+    # === CONCURRENT DOWNLOADS ===
     download_tasks = []
-    task_metadata = []  # Track what each task is for
+    task_metadata = []
 
-    # Task 0: Author icon (if exists)
+    # Task: Author icon
     if twitter_user.icon:
         log.info(f"Queueing author icon download: {twitter_user.icon}")
         download_tasks.append(download_media(session, twitter_user.icon, max_size=convert_mb_to_bytes(5)))
-        task_metadata.append(('author_icon', twitter_user.icon, None))
+        task_metadata.append((MediaType.AUTHOR_ICON, twitter_user.icon))
 
-    # Tasks 1+: Videos
-    for media in videos:
-        log.info(f"Queueing video download: {media.url}")
-        download_tasks.append(download_media(session, media.url, max_size=max_file_size))
-        task_metadata.append(('video', media.url, media))
-
-    # Tasks N+: Images
+    # Tasks: Images (always download)
     for media in images:
         log.info(f"Queueing image download: {media.url}")
         download_tasks.append(download_media(session, media.url, max_size=max_file_size))
-        task_metadata.append(('image', media.url, media))
+        task_metadata.append((MediaType.IMAGE, media.url))
 
-    # Tasks M+: Video thumbnails (always queue them, we'll decide later if we need them)
-    for media in video_thumbnails:
-        log.info(f"Queueing video thumbnail download: {media.url}")
-        download_tasks.append(download_media(session, media.url, max_size=max_file_size))
-        task_metadata.append(('video_thumbnail', media.url, media))
+    # Tasks: Video thumbnails (ONLY if we don't have video)
+    if tweet_has_video and not payload.video_uploaded:
+        for media in video_thumbnails:
+            log.info(f"Queueing video thumbnail download (fallback): {media.url}")
+            download_tasks.append(download_media(session, media.url, max_size=max_file_size))
+            task_metadata.append((MediaType.VIDEO_THUMBNAIL, media.url))
 
-    # Download ALL media concurrently
-    log.info(f"🚀 Starting {len(download_tasks)} concurrent downloads...")
-    download_results = await asyncio.gather(*download_tasks, return_exceptions=True)
-    log.info(f"✅ All downloads completed")
+    # Download all concurrently
+    if download_tasks:
+        log.info(f"🚀 Starting {len(download_tasks)} concurrent downloads...")
+        download_results = await asyncio.gather(*download_tasks, return_exceptions=True)
+        log.info(f"✅ All downloads completed")
 
-    # Process results
-    video_uploaded = False
-    video_too_large = False
-    downloaded_thumbnails = []  # Store thumbnails separately
-
-    for (media_type, url, media_obj), result in zip(task_metadata, download_results):
-        if isinstance(result, Exception):
-            log.error(f"Failed to download {media_type} from {url}: {result}")
-            if media_type == 'video':
-                video_too_large = True
-            continue
-
-        if result is None:
-            log.warning(f"Download returned None for {media_type}: {url}")
-            if media_type == 'video':
-                video_too_large = True
-            continue
-
-        # Process based on type
-        if media_type == 'author_icon':
-            author_icon_filename = f"profile_{hashlib.md5(url.encode()).hexdigest()[:8]}.jpg"
-            author_icon_data = result
-            log.info(f"✅ Author icon ready: {author_icon_filename}")
-
-        elif media_type == 'video':
-            filename = generate_media_filename(url, len(media_data))
-            media_data.append((filename, result, 'video'))
-            video_uploaded = True
-            log.info(f"✅ Video ready: {filename} ({len(result) / 1024 / 1024:.2f}MB)")
-
-        elif media_type == 'image':
-            filename = generate_media_filename(url, len(media_data))
-            media_data.append((filename, result, 'image'))
-            log.info(f"✅ Image ready: {filename}")
-
-        elif media_type == 'video_thumbnail':
-            # Store thumbnails for later decision
-            downloaded_thumbnails.append((url, result))
-            log.info(f"✅ Video thumbnail ready (cached)")
-
-    # Decide if we need to use video thumbnails
-    need_thumbnails = (video_too_large or (tweet_has_video and not video_uploaded)) and not video_uploaded
-
-    if need_thumbnails:
-        if video_too_large:
-            log.info("Video too large, using downloaded thumbnails as fallback")
-        else:
-            log.info("Video source not available, using downloaded thumbnails")
-
-        for url, content in downloaded_thumbnails:
-            filename = generate_media_filename(url, len(media_data))
-            media_data.append((filename, content, 'image'))
-            log.info(f"✅ Using thumbnail: {filename}")
-
-    # Update title based on video status
-    if tweet_has_video and not video_uploaded:
-        if video_too_large:
-            updated_title = f"{title}\n\n🎥 *[Video too large for Discord (>25MB), click link to watch]*"
-        else:
-            updated_title = f"{title}\n\n🎥 *[This tweet has video - click link to watch]*"
-
-    # Filter embed media
-    for filename, file_data, file_type in media_data:
-        if file_type == 'video':
-            continue
-        elif file_type == 'image':
-            is_video_thumb = 'tweet_video_thumb' in filename or 'video_thumb' in filename
-            if is_video_thumb and video_uploaded:
-                log.info(f"Skipping video thumbnail {filename} (video was uploaded)")
+        # Process results with proper typing
+        for (media_type, url), result in zip(task_metadata, download_results):
+            if isinstance(result, Exception):
+                log.error(f"Failed to download {media_type.value} from {url}: {result}")
                 continue
-            else:
-                embed_media.append((filename, file_data, file_type))
-        else:
-            embed_media.append((filename, file_data, file_type))
 
-    log.info(f"Embed will display {len(embed_media)} images (filtered from {len(media_data)} total media)")
+            if result is None:
+                log.warning(f"Download returned None for {media_type.value}: {url}")
+                continue
 
-    return author_icon_data, author_icon_filename, updated_title, video_uploaded, embed_media, media_data
+            # Generate filename
+            if media_type == MediaType.AUTHOR_ICON:
+                filename = f"profile_{hashlib.md5(url.encode()).hexdigest()[:8]}.jpg"
+                payload.author_icon_data = result
+                payload.author_icon_filename = filename
+                log.info(f"✅ Author icon ready: {filename}")
+
+            elif media_type == MediaType.IMAGE:
+                filename = generate_media_filename(url, len(payload.images))
+                downloaded = DownloadedMedia(
+                    filename=filename,
+                    data=result,
+                    media_type=media_type,
+                    original_url=url
+                )
+                payload.images.append(downloaded)
+                payload.all_attachments.append(downloaded)
+                log.info(f"✅ Image ready: {filename}")
+
+            elif media_type == MediaType.VIDEO_THUMBNAIL:
+                filename = generate_media_filename(url, len(payload.images))
+                downloaded = DownloadedMedia(
+                    filename=filename,
+                    data=result,
+                    media_type=media_type,
+                    original_url=url
+                )
+                payload.images.append(downloaded)
+                payload.all_attachments.append(downloaded)
+                log.info(f"✅ Video thumbnail ready (fallback): {filename}")
+
+    log.info(f"Payload ready: {payload.video_count} videos, {payload.image_count} images")
+    return payload
 
 
-async def send_to_discord_with_media(session: ClientSession, tweet_link: str, embed_title: str,
-                                     tweet_media_list: List[TwitterMedia], tweet_has_video: bool,
-                                     timestamp: float, twitter_user: TwitterUser) -> bool:
-    """Send tweet to Discord with media uploaded as attachments (async)."""
+async def send_to_discord_with_media(session: ClientSession,
+                                     tweet_link: str,
+                                     embed_title: str,
+                                     tweet_media_list: List[TwitterMedia],
+                                     tweet_has_video: bool,
+                                     timestamp: float,
+                                     twitter_user: TwitterUser
+                                     ) -> bool:
+    """
+    Send tweet to Discord with proper video/embed separation.
+    Copying from tweetshift method - Kurisutaru
+    Step 1: Send video URLs (if any)
+    Step 2: Send embed with images
+    """
     content = tweet_link
-    if mainConfig.config.useFxTwitter:
+    if main_config.config.useFxTwitterLinkInDiscord:
         content = content.replace(__twitter_url, __fxtwitter_url)
 
     if twitter_user.discordMention and twitter_user.discordMentionRoleId:
@@ -734,60 +859,82 @@ async def send_to_discord_with_media(session: ClientSession, tweet_link: str, em
         content = f'{content}\n{mentions}'
 
     all_success = True
+
     for webhook_url in twitter_user.webhookUrl:
         try:
-            log.info(f"Sending to webhook: {webhook_url[:50]}...")
+            log.info(f"Processing webhook: {webhook_url[:50]}...")
 
+            # Generate payload
+            payload = await generate_media_webhook(
+                session, tweet_link, embed_title, tweet_media_list,
+                tweet_has_video, twitter_user
+            )
+
+            # === STEP 1: Send videos first (URLs only, no download) ===
+            if payload.videos:
+                log.info(f"📹 Sending {payload.video_count} video(s) first...")
+                for video in payload.videos:
+                    video_content = __video_embed_content.format(video.url)
+                    video_webhook = DiscordWebhook(
+                        url=webhook_url,
+                        content=video_content,
+                        rate_limit_retry=True
+                    )
+                    video_response = video_webhook.execute()
+
+                    if video_response.ok:
+                        log.info(f"✅ Video posted: {video.filename}")
+                    else:
+                        log.error(f"❌ Failed to post video. HTTP {video_response.status_code}")
+                        all_success = False
+
+            # === STEP 2: Send embed with images ===
             webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
 
-            if mainConfig.config.generateEmbed:
-                author_icon_data, author_icon_filename, updated_title, video_uploaded, embed_media, media_data = (
-                    await generate_media_webhook(session, tweet_link, embed_title, tweet_media_list, tweet_has_video, twitter_user))
+            # Attach author icon
+            if payload.author_icon_data:
+                webhook.add_file(file=payload.author_icon_data, filename=payload.author_icon_filename)
+                author_icon_url = f"attachment://{payload.author_icon_filename}"
+            else:
+                author_icon_url = twitter_user.icon
 
-                if author_icon_data:
-                    webhook.add_file(file=author_icon_data, filename=author_icon_filename)
-                    author_icon_url = f"attachment://{author_icon_filename}"
-                else:
-                    author_icon_url = twitter_user.icon
+            # Attach all images
+            for media in payload.all_attachments:
+                webhook.add_file(file=media.data, filename=media.filename)
 
-                for filename, file_data, file_type in media_data:
-                    webhook.add_file(file=file_data, filename=filename)
-
-                if embed_media:
-                    for idx, (filename, _, file_type) in enumerate(embed_media):
-                        is_first_index = idx == 0
-                        embed = generate_embed_data(
-                            title=updated_title if is_first_index else "",
-                            media_count=len(embed_media),
-                            has_video=tweet_has_video,
-                            video_uploaded=video_uploaded,
-                            timestamp=timestamp if is_first_index else None,
-                            author_name=twitter_user.name if is_first_index else None,
-                            author_url=twitter_user.link if is_first_index else None,
-                            author_icon_url=author_icon_url if is_first_index else None
-                        )
-
-                        embed.set_image(url=f"attachment://{filename}")
-                        embed.set_url(tweet_link)
-                        webhook.add_embed(embed)
-                else:
+            # Create embeds
+            if payload.images:
+                for idx, media in enumerate(payload.images):
+                    is_first = idx == 0
                     embed = generate_embed_data(
-                        title=updated_title,
-                        media_count=len(media_data),
-                        has_video=tweet_has_video,
-                        video_uploaded=video_uploaded,
-                        timestamp=timestamp,
-                        author_name=twitter_user.name,
-                        author_url=twitter_user.link,
-                        author_icon_url=author_icon_url
+                        title=payload.cleaned_description if is_first else "",
+                        payload=payload,
+                        timestamp=timestamp if is_first else None,
+                        author_name=twitter_user.name if is_first else None,
+                        author_url=twitter_user.link if is_first else None,
+                        author_icon_url=author_icon_url if is_first else None
                     )
+                    embed.set_image(url=f"attachment://{media.filename}")
+                    embed.set_url(tweet_link)
                     webhook.add_embed(embed)
+            else:
+                # No images, just text embed
+                embed = generate_embed_data(
+                    title=payload.cleaned_description,
+                    payload=payload,
+                    timestamp=timestamp,
+                    author_name=twitter_user.name,
+                    author_url=twitter_user.link,
+                    author_icon_url=author_icon_url
+                )
+                embed.set_url(tweet_link)
+                webhook.add_embed(embed)
 
             response = webhook.execute()
             if response.ok:
-                log.info(f"✅ Posted to webhook successfully")
+                log.info(f"✅ Embed posted successfully")
             else:
-                log.error(f"❌ Failed to post to webhook. HTTP {response.status_code}")
+                log.error(f"❌ Failed to post embed. HTTP {response.status_code}")
                 all_success = False
 
         except Exception as webhook_error:
@@ -820,8 +967,8 @@ async def main():
                 connector=connector,
                 timeout=timeout,
                 headers={
+                    # needed fetch_video_from_fxtwitter, if I put browser agent, it just redirects
                     'User-Agent': 'curl/8.16.0',
-                    # needed fetch_video_from_fxtwitter, if i put browser agent, it just redirect
                     'Accept-Encoding': 'gzip, deflate',
                     'Connection': 'keep-alive',
                 }
@@ -831,11 +978,11 @@ async def main():
             twitter_user_list: List[TwitterUser] = []
             entry_data: List[EntryData] = []
 
-            nitter_server_distribution_list = random.choices(mainConfig.nitterServer, k=len(mainConfig.twitterWatch))
+            nitter_server_distribution_list = random.choices(main_config.nitterServer, k=len(main_config.twitterWatch))
 
             # Create tasks for fetching all RSS feeds
             feed_tasks = []
-            for item, nitter in zip(mainConfig.twitterWatch, nitter_server_distribution_list):
+            for item, nitter in zip(main_config.twitterWatch, nitter_server_distribution_list):
                 feed_tasks.append(fetch_rss_feed(session, item.twitterHandleName, nitter))
 
             # Fetch all feeds concurrently
@@ -843,7 +990,7 @@ async def main():
             feed_results = await asyncio.gather(*feed_tasks, return_exceptions=True)
 
             # Process feed results
-            for item, feedParse in zip(mainConfig.twitterWatch, feed_results):
+            for item, feedParse in zip(main_config.twitterWatch, feed_results):
                 if isinstance(feedParse, Exception) or feedParse is None:
                     log.warning(f"Failed to fetch feed for {item.twitterHandleName}")
                     continue
@@ -901,7 +1048,7 @@ async def main():
                     )
 
                     if temp_data.is_retweet():
-                        if mainConfig.config.includeReTweet:
+                        if main_config.config.includeReTweet:
                             entry_data.append(temp_data)
                     else:
                         entry_data.append(temp_data)
@@ -925,7 +1072,7 @@ async def main():
                     success = await send_to_discord_with_media(
                         session=session,
                         tweet_link=data.link,
-                        embed_title=data.title,
+                        embed_title=data.description,
                         tweet_media_list=data.mediaList,
                         tweet_has_video=data.hasVideo,
                         timestamp=data.timestamp,
