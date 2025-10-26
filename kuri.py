@@ -219,13 +219,13 @@ class TwitterDiscordConfig(DataClassJSONMixin):
 
 @dataclass
 class TwitterMedia:
-    """Represents media in a tweet"""
+    """Represents assets in a tweet"""
     url: str
     type: str  # 'image', 'video', or 'video_thumbnail'
 
 
 class MediaType(Enum):
-    """Strong typing for media types"""
+    """Strong typing for assets types"""
     IMAGE = "image"
     VIDEO_URL = "video_url"  # URL to video (from fxtwitter)
     VIDEO_THUMBNAIL = "video_thumbnail"
@@ -234,7 +234,7 @@ class MediaType(Enum):
 
 @dataclass
 class DownloadedMedia:
-    """Represents downloaded media with proper typing"""
+    """Represents downloaded assets with proper typing"""
     filename: str
     data: bytes
     media_type: MediaType
@@ -472,7 +472,7 @@ def detect_extension(url: str) -> str:
 
 
 def generate_media_filename(url: str, index: int = 0) -> str:
-    """Generate unique filename for media"""
+    """Generate unique filename for assets"""
     url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
     ext = detect_extension(url)
 
@@ -482,7 +482,7 @@ def generate_media_filename(url: str, index: int = 0) -> str:
 
 
 def extract_media_from_description(description: str, twitter_card_template: str) -> tuple[List[TwitterMedia], bool]:
-    """Extract all media URLs from RSS description."""
+    """Extract all assets URLs from RSS description."""
     extracted_media_list = []
     video_detected = False
     soup = BeautifulSoup(description, 'lxml')
@@ -662,7 +662,7 @@ async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url
 
 
 async def download_media(session: ClientSession, url: str, max_size: int = convert_mb_to_bytes(25)) -> Optional[bytes]:
-    """Download media file asynchronously with size limit"""
+    """Download assets file asynchronously with size limit"""
     try:
         async with session.get(url, timeout=ClientTimeout(total=30)) as response:
             if response.ok:
@@ -672,7 +672,7 @@ async def download_media(session: ClientSession, url: str, max_size: int = conve
                     return None
                 return content
             else:
-                log.warning(f"Failed to download media: HTTP {response.status}")
+                log.warning(f"Failed to download assets: HTTP {response.status}")
                 return None
     except asyncio.TimeoutError:
         log.error(f"Timeout downloading: {url}")
@@ -723,7 +723,7 @@ async def generate_media_webhook(
         twitter_user: TwitterUser
 ) -> WebhookMediaPayload:
     """
-    Generate media webhook data with async downloads.
+    Generate assets webhook data with async downloads.
     Returns strongly-typed payload with clear separation between videos and images.
     """
     max_file_size = convert_mb_to_bytes(10)
@@ -732,7 +732,7 @@ async def generate_media_webhook(
     # Clean description first
     payload.cleaned_description = clean_tweet_description(title)
 
-    # Separate media by type
+    # Separate assets by type
     videos_from_rss = [m for m in tweet_media_list if m.type == 'video']
     video_thumbnails = [m for m in tweet_media_list if m.type == 'video_thumbnail']
     images = [m for m in tweet_media_list if m.type == 'image']
