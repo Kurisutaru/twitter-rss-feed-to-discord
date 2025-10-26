@@ -1,12 +1,13 @@
 import asyncio
 import atexit
-import calendar as cal
+import calendar
 import hashlib
 import os
 import random
 import re
 import signal
 import sys
+import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -14,15 +15,15 @@ from enum import Enum
 from operator import attrgetter
 from os.path import isfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 from urllib.parse import urljoin, unquote, urlparse
 
 import dateutil.parser
-import feedparser
+import fastfeedparser
 from aiohttp import ClientSession, TCPConnector, ClientTimeout
 from bs4 import BeautifulSoup
 from discord_webhook import DiscordEmbed, DiscordWebhook
-from feedparser import FeedParserDict
+from fastfeedparser import FastFeedParserDict
 from loguru import logger as log
 from mashumaro.mixins.json import DataClassJSONMixin
 
@@ -142,16 +143,24 @@ class ScriptLock:
 lock = ScriptLock('kuri.lock')
 lock.acquire()
 
+# emoji
+__emoji_play = '▶️'
+__emoji_video = '🎬'
+__emoji_photo = '🖼️'
+
+# Special character
+__braille_pattern_blank = '\u2800'
+
 # Variable
 __twitter_url: str = 'https://x.com'
 __fxtwitter_url: str = 'https://fxtwitter.com'
 __twitter_image_card_link_template: str = 'https://pbs.twimg.com/{}{}'
 __post_video_identifier: str = 'ext_tw_video_thumb'
 __rss_template: str = '{}/{}/rss'
-__video_embed_content: str = '▶️[\u2800]({})'
+__video_embed_content: str = f"{__emoji_play}[{__braille_pattern_blank}]({{}})"
+__video_upload_content: str = f"{__emoji_play}{__braille_pattern_blank}"
 __footer_append_template: str = ' • {}'
-__emoji_video = '🎬'
-__emoji_photo = '🖼️'
+__discord_maximum_file_size: int = 10
 
 # JSONFile
 __json_file: str = 'kuri.config.json'
@@ -236,16 +245,9 @@ class MediaType(Enum):
 class DownloadedMedia:
     """Represents downloaded assets with proper typing"""
     filename: str
-    data: bytes
+    data: Optional[bytes]
     media_type: MediaType
     original_url: str
-
-
-@dataclass
-class VideoEmbed:
-    """Represents a video to be embedded (URL only, not downloaded)"""
-    url: str
-    filename: str
 
 
 @dataclass
@@ -255,8 +257,8 @@ class WebhookMediaPayload:
     author_icon_data: Optional[bytes] = None
     author_icon_filename: Optional[str] = None
 
-    # Videos (URLs only, sent first)
-    videos: List[VideoEmbed] = None
+    # Videos (DownloadedMedia with data=bytes for uploaded, data=None for URL-only)
+    videos: List[DownloadedMedia] = None
 
     # Images to attach and embed
     images: List[DownloadedMedia] = None
@@ -297,7 +299,7 @@ if not isfile(__json_file):
 with open(__json_file, 'r') as f:
     main_config = TwitterDiscordConfig.from_json(f.read())
 
-nitter_url: list[str] = [*main_config.nitterServer, 'http://nitter.net']
+nitter_url_list: list[str] = [*main_config.nitterServer, 'http://nitter.net']
 
 
 def read_last_run(filename: str = __last_run_file) -> datetime:
@@ -337,6 +339,10 @@ def convert_mb_to_bytes(input_mb: int) -> int:
     return input_mb * 1024 * 1024
 
 
+def convert_bytes_to_mb(input_mb: int) -> float:
+    return input_mb / 1024 / 1024
+
+
 def get_filename_from_url(url: str) -> str:
     return os.path.basename(urlparse(url).path)
 
@@ -356,9 +362,33 @@ def replace_nitter_url_to_twitter_url(input_string: str) -> str:
     """Replace nitter domain with Twitter domain"""
     return_string = unquote(input_string)
     return_string = return_string.replace('http://', 'https://').replace('#m', '')
-    for serv in nitter_url:
+    for serv in nitter_url_list:
         return_string = return_string.replace(urlparse(serv).netloc, urlparse(__twitter_url).netloc)
     return return_string
+
+
+async def check_video_size(session: ClientSession, url: str, max_size: int = convert_mb_to_bytes(__discord_maximum_file_size)) -> Optional[int]:
+    """
+    Check Content-Length of video without downloading.
+    Returns size in bytes if available and under limit, None otherwise.
+    """
+    try:
+        async with session.head(url, timeout=ClientTimeout(total=10), allow_redirects=True) as response:
+            if response.ok:
+                content_length = response.headers.get('Content-Length')
+                if content_length:
+                    size = int(content_length)
+                    log.info(f"Video size: {convert_bytes_to_mb(size):.2f}MB")
+                    return size if size <= max_size else None
+                else:
+                    log.warning("No Content-Length header found")
+                    return None
+            else:
+                log.warning(f"HEAD request failed: HTTP {response.status}")
+                return None
+    except Exception as e:
+        log.error(f"Error checking video size: {e}")
+        return None
 
 
 def extract_video_url_from_nitter(nitter_video_url: str) -> str:
@@ -385,7 +415,7 @@ def extract_video_url_from_nitter(nitter_video_url: str) -> str:
     cleaned = unquoted.replace('http://', 'https://').replace('/pic/', '')
 
     # Remove nitter domains
-    for domain in nitter_url:
+    for domain in nitter_url_list:
         cleaned = cleaned.replace(domain, '')
 
     # Clean up any double slashes (except after https:)
@@ -416,9 +446,23 @@ def generate_twitter_picture_link(input_string: str, twitter_image_card_link_tem
     return return_string
 
 
-def generate_timestamp(input_time) -> int:
-    """Convert time struct to timestamp"""
-    return cal.timegm(input_time)
+def generate_timestamp(input_time: Union["time.struct_time", str]) -> int:
+    """
+    Convert a feed-published time to a POSIX timestamp (seconds since epoch).
+
+    * ``input_time`` is a ``time.struct_time`` → ``calendar.timegm`` (feedparser)
+    * ``input_time`` is an ISO-8601 string → ``datetime.fromisoformat`` → ``timestamp()`` (fastfeedparser)
+
+    Returns ``int`` (UTC seconds).
+    """
+    if isinstance(input_time, str):
+        # fastfeedparser returns a clean UTC ISO-8601 string
+        # e.g. "2025-10-26T12:34:56Z"  or  "2025-10-26T12:34:56+00:00"
+        dt = datetime.fromisoformat(input_time.replace("Z", "+00:00"))
+        return int(dt.timestamp())
+    else:
+        # feedparser returns a struct_time (already in UTC)
+        return calendar.timegm(input_time)
 
 
 def generate_date_from_timestamp(input_time) -> datetime:
@@ -434,7 +478,8 @@ def normalize_datetime_to_utc_naive(dt: datetime) -> datetime:
         return dt
 
 
-def generate_twitter_user_from_rss(feed_data: FeedParserDict, key: str, webhook_url: list[str], discord_mention: bool,
+def generate_twitter_user_from_rss(feed_data: FastFeedParserDict, key: str, webhook_url: list[str],
+                                   discord_mention: bool,
                                    discord_mention_role_id: list[str]) -> TwitterUser:
     """Create TwitterUser object from RSS feed data"""
     return TwitterUser(
@@ -640,7 +685,7 @@ def generate_embed_data(title: str, payload: WebhookMediaPayload,
     return embed
 
 
-async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url: str) -> Optional[FeedParserDict]:
+async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url: str) -> Optional[FastFeedParserDict]:
     """Fetch RSS feed asynchronously"""
     rss_url = generate_rss_url(twitter_handle, nitter_url)
     try:
@@ -648,7 +693,7 @@ async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url
             if response.ok:
                 content = await response.text()
                 # feedparser is synchronous but fast, so it's acceptable
-                feed = feedparser.parse(content)
+                feed = fastfeedparser.parse(content)
                 return feed
             else:
                 log.warning(f"Failed to fetch RSS for {twitter_handle}: HTTP {response.status}")
@@ -668,7 +713,7 @@ async def download_media(session: ClientSession, url: str, max_size: int = conve
             if response.ok:
                 content = await response.read()
                 if len(content) > max_size:
-                    log.warning(f"Media too large ({len(content) / 1024 / 1024:.2f}MB): {url}")
+                    log.warning(f"Media too large ({convert_bytes_to_mb(len(content)):.2f}MB): {url}")
                     return None
                 return content
             else:
@@ -723,24 +768,23 @@ async def generate_media_webhook(
         twitter_user: TwitterUser
 ) -> WebhookMediaPayload:
     """
-    Generate assets webhook data with async downloads.
+    Generate media webhook data with async downloads.
     Returns strongly-typed payload with clear separation between videos and images.
     """
-    max_file_size = convert_mb_to_bytes(10)
+    max_file_size = convert_mb_to_bytes(__discord_maximum_file_size)
     payload = WebhookMediaPayload()
 
     # Clean description first
     payload.cleaned_description = clean_tweet_description(title)
 
-    # Separate assets by type
+    # Separate media by type
     videos_from_rss = [m for m in tweet_media_list if m.type == 'video']
     video_thumbnails = [m for m in tweet_media_list if m.type == 'video_thumbnail']
     images = [m for m in tweet_media_list if m.type == 'image']
 
     # === VIDEO HANDLING ===
-    video_url = None
-
     if tweet_has_video:
+        log.info(f"Tweet have video")
         if videos_from_rss:
             # Use video from RSS
             video_url = videos_from_rss[0].url
@@ -754,12 +798,50 @@ async def generate_media_webhook(
                 log.info(f"✅ Got video URL from fxtwitter")
             else:
                 log.warning("❌ Failed to get video from fxtwitter, will use thumbnails")
+                video_url = None
 
         if video_url:
-            payload.videos.append(VideoEmbed(
-                url=video_url,
-                filename=get_filename_from_url(video_url)
-            ))
+            # Check video size
+            log.info("Checking video size...")
+            video_size = await check_video_size(session, video_url, max_size=max_file_size)
+
+            filename = generate_media_filename(video_url)
+
+            if video_size is not None:
+                # Video is under 10MB, download it
+                log.info(f"Video is under 10MB ({video_size / 1024 / 1024:.2f}MB), downloading...")
+                video_data = await download_media(session, video_url, max_size=max_file_size)
+
+                if video_data:
+                    downloaded_video = DownloadedMedia(
+                        filename=filename,
+                        data=video_data,
+                        media_type=MediaType.VIDEO_URL,
+                        original_url=video_url
+                    )
+                    payload.videos.append(downloaded_video)
+                    log.info(f"✅ Video downloaded successfully: {filename}")
+                else:
+                    # Download failed, store URL only
+                    log.warning("Failed to download video, will use URL only")
+                    url_only_video = DownloadedMedia(
+                        filename=filename,
+                        data=None,
+                        media_type=MediaType.VIDEO_URL,
+                        original_url=video_url
+                    )
+                    payload.videos.append(url_only_video)
+            else:
+                # Video is over 10MB, store URL only
+                log.info("Video is over 10MB or size unknown, will use URL only")
+                url_only_video = DownloadedMedia(
+                    filename=filename,
+                    data=None,
+                    media_type=MediaType.VIDEO_URL,
+                    original_url=video_url
+                )
+                payload.videos.append(url_only_video)
+
             payload.video_uploaded = True
 
     # === CONCURRENT DOWNLOADS ===
@@ -846,8 +928,7 @@ async def send_to_discord_with_media(session: ClientSession,
                                      ) -> bool:
     """
     Send tweet to Discord with proper video/embed separation.
-    Copying from tweetshift method - Kurisutaru
-    Step 1: Send video URLs (if any)
+    Step 1: Send video (uploaded if <10MB, URL if >10MB)
     Step 2: Send embed with images
     """
     content = tweet_link
@@ -870,16 +951,25 @@ async def send_to_discord_with_media(session: ClientSession,
                 tweet_has_video, twitter_user
             )
 
-            # === STEP 1: Send videos first (URLs only, no download) ===
+            # === STEP 1: Send videos first ===
             if payload.videos:
-                log.info(f"📹 Sending {payload.video_count} video(s) first...")
+                log.info(f"📹 Sending {len(payload.videos)} video(s)...")
                 for video in payload.videos:
-                    video_content = __video_embed_content.format(video.url)
                     video_webhook = DiscordWebhook(
                         url=webhook_url,
-                        content=video_content,
                         rate_limit_retry=True
                     )
+
+                    if video.data:
+                        # Video was downloaded, upload as file
+                        log.info(f"Uploading video as file: {video.filename}")
+                        video_webhook.content = __video_upload_content
+                        video_webhook.add_file(file=video.data, filename=video.filename)
+                    else:
+                        # Video too large or download failed, send URL
+                        log.info(f"Sending video URL: {video.original_url}")
+                        video_webhook.content = __video_embed_content.format(video.original_url)
+
                     video_response = video_webhook.execute()
 
                     if video_response.ok:
@@ -1041,7 +1131,7 @@ async def main():
                         description=data.description,
                         link=replace_url_to_twitter(data.link, __twitter_url),
                         pubdate=pub_date,
-                        timestamp=generate_timestamp(data.published_parsed),
+                        timestamp=generate_timestamp(data.published),
                         key=item.twitterHandleName,
                         mediaList=extracted_media,
                         hasVideo=video_detected
