@@ -1,11 +1,13 @@
 import asyncio
 import atexit
+import calendar
 import hashlib
 import os
 import random
 import re
 import signal
 import sys
+import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -13,7 +15,7 @@ from enum import Enum
 from operator import attrgetter
 from os.path import isfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 from urllib.parse import urljoin, unquote, urlparse
 
 import dateutil.parser
@@ -23,12 +25,13 @@ from bs4 import BeautifulSoup
 from discord_webhook import DiscordEmbed, DiscordWebhook
 from feedparser import FeedParserDict
 from loguru import logger as log
+# Keep lxml import — used in RSS patching
+# noinspection PyUnresolvedReferences
+from lxml import etree
 from mashumaro.mixins.json import DataClassJSONMixin
 
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
-
-feedparser.PREFERRED_XML_PARSERS = ["drv_libxml2"]
 
 # Configure log
 log_file = os.path.join(script_dir, 'app.log')
@@ -335,13 +338,36 @@ def write_last_run(timestamp: datetime, filename: str = __last_run_file):
         log.error(f"Error writing last run timestamp: {write_error}")
 
 
+def generate_timestamp(input_time: Union["time.struct_time", str]) -> int:
+    """
+    Convert a feed-published time to a POSIX timestamp (seconds since epoch).
+
+    * ``input_time`` is a ``time.struct_time`` → ``calendar.timegm`` (feedparser)
+    * ``input_time`` is an ISO-8601 string → ``datetime.fromisoformat`` → ``timestamp()`` (fastfeedparser)
+
+    Returns ``int`` (UTC seconds).
+    """
+    if isinstance(input_time, str):
+        # fastfeedparser returns a clean UTC ISO-8601 string
+        # e.g. "2025-10-26T12:34:56Z"  or  "2025-10-26T12:34:56+00:00"
+        dt = datetime.fromisoformat(input_time.replace("Z", "+00:00"))
+        return int(dt.timestamp())
+    else:
+        # feedparser returns a struct_time (already in UTC)
+        return calendar.timegm(input_time)
+
+
+def generate_date_from_timestamp(input_time) -> datetime:
+    """Convert timestamp to datetime"""
+    return datetime.fromtimestamp(input_time)
+
+
 def convert_mb_to_bytes(input_mb: int) -> int:
     return input_mb * 1024 * 1024
 
 
 def convert_bytes_to_mb(input_mb: int) -> float:
     return input_mb / 1024 / 1024
-
 
 
 def generate_rss_url(twitter_handle_name: str, nitter_url: str) -> str:
@@ -364,7 +390,8 @@ def replace_nitter_url_to_twitter_url(input_string: str) -> str:
     return return_string
 
 
-async def check_video_size(session: ClientSession, url: str, max_size: int = convert_mb_to_bytes(__discord_maximum_file_size)) -> Optional[int]:
+async def check_video_size(session: ClientSession, url: str,
+                           max_size: int = convert_mb_to_bytes(__discord_maximum_file_size)) -> Optional[int]:
     """
     Check Content-Length of video without downloading.
     Returns size in bytes if available and under limit, None otherwise.
@@ -456,8 +483,8 @@ def generate_twitter_user_from_rss(feed_data: FeedParserDict, key: str, webhook_
                                    discord_mention_role_id: list[str]) -> TwitterUser:
     """Create TwitterUser object from RSS feed data"""
     return TwitterUser(
-        name=generate_twitter_embed_name(feed_data.feed.image.title),
-        link=replace_url_to_twitter(feed_data.feed.image.link, __twitter_url),
+        name=generate_twitter_embed_name(feed_data.feed.title),
+        link=replace_url_to_twitter(feed_data.feed.link, __twitter_url),
         icon=generate_twitter_profile_picture_link(feed_data.feed.image.href),
         key=key,
         webhookUrl=webhook_url,
@@ -665,10 +692,9 @@ async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url
     try:
         async with session.get(rss_url, timeout=ClientTimeout(total=30)) as response:
             if response.ok:
-                content = await response.text()
+                content = await response.read()
                 # feedparser is synchronous but fast, so it's acceptable
-                feed = feedparser.parse(content,
-                                        resolve_relative_uris=False)
+                feed = feedparser.parse(content)
                 return feed
             else:
                 log.warning(f"Failed to fetch RSS for {twitter_handle}: HTTP {response.status}")
@@ -1120,7 +1146,7 @@ async def main():
                         description=data.description,
                         link=replace_url_to_twitter(data.link, __twitter_url),
                         pubdate=pub_date,
-                        timestamp=pub_date.timestamp(),
+                        timestamp=generate_timestamp(data.published_parsed),
                         key=item.twitterHandleName,
                         mediaList=extracted_media,
                         hasVideo=video_detected
