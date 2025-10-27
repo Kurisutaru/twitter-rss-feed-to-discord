@@ -1,13 +1,11 @@
 import asyncio
 import atexit
-import calendar
 import hashlib
 import os
 import random
 import re
 import signal
 import sys
-import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,20 +13,22 @@ from enum import Enum
 from operator import attrgetter
 from os.path import isfile
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional
 from urllib.parse import urljoin, unquote, urlparse
 
 import dateutil.parser
-import fastfeedparser
+import feedparser
 from aiohttp import ClientSession, TCPConnector, ClientTimeout
 from bs4 import BeautifulSoup
 from discord_webhook import DiscordEmbed, DiscordWebhook
-from fastfeedparser import FastFeedParserDict
+from feedparser import FeedParserDict
 from loguru import logger as log
 from mashumaro.mixins.json import DataClassJSONMixin
 
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
+
+feedparser.PREFERRED_XML_PARSERS = ["drv_libxml2"]
 
 # Configure log
 log_file = os.path.join(script_dir, 'app.log')
@@ -343,9 +343,6 @@ def convert_bytes_to_mb(input_mb: int) -> float:
     return input_mb / 1024 / 1024
 
 
-def get_filename_from_url(url: str) -> str:
-    return os.path.basename(urlparse(url).path)
-
 
 def generate_rss_url(twitter_handle_name: str, nitter_url: str) -> str:
     """Generate RSS feed URL for a Twitter user"""
@@ -446,30 +443,6 @@ def generate_twitter_picture_link(input_string: str, twitter_image_card_link_tem
     return return_string
 
 
-def generate_timestamp(input_time: Union["time.struct_time", str]) -> int:
-    """
-    Convert a feed-published time to a POSIX timestamp (seconds since epoch).
-
-    * ``input_time`` is a ``time.struct_time`` → ``calendar.timegm`` (feedparser)
-    * ``input_time`` is an ISO-8601 string → ``datetime.fromisoformat`` → ``timestamp()`` (fastfeedparser)
-
-    Returns ``int`` (UTC seconds).
-    """
-    if isinstance(input_time, str):
-        # fastfeedparser returns a clean UTC ISO-8601 string
-        # e.g. "2025-10-26T12:34:56Z"  or  "2025-10-26T12:34:56+00:00"
-        dt = datetime.fromisoformat(input_time.replace("Z", "+00:00"))
-        return int(dt.timestamp())
-    else:
-        # feedparser returns a struct_time (already in UTC)
-        return calendar.timegm(input_time)
-
-
-def generate_date_from_timestamp(input_time) -> datetime:
-    """Convert timestamp to datetime"""
-    return datetime.fromtimestamp(input_time)
-
-
 def normalize_datetime_to_utc_naive(dt: datetime) -> datetime:
     """Normalize any datetime to UTC timezone-naive format for consistent comparison."""
     if dt.tzinfo is not None:
@@ -478,7 +451,7 @@ def normalize_datetime_to_utc_naive(dt: datetime) -> datetime:
         return dt
 
 
-def generate_twitter_user_from_rss(feed_data: FastFeedParserDict, key: str, webhook_url: list[str],
+def generate_twitter_user_from_rss(feed_data: FeedParserDict, key: str, webhook_url: list[str],
                                    discord_mention: bool,
                                    discord_mention_role_id: list[str]) -> TwitterUser:
     """Create TwitterUser object from RSS feed data"""
@@ -685,15 +658,17 @@ def generate_embed_data(title: str, payload: WebhookMediaPayload,
     return embed
 
 
-async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url: str) -> Optional[FastFeedParserDict]:
+async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url: str) -> Optional[FeedParserDict]:
     """Fetch RSS feed asynchronously"""
     rss_url = generate_rss_url(twitter_handle, nitter_url)
+
     try:
         async with session.get(rss_url, timeout=ClientTimeout(total=30)) as response:
             if response.ok:
                 content = await response.text()
                 # feedparser is synchronous but fast, so it's acceptable
-                feed = fastfeedparser.parse(content)
+                feed = feedparser.parse(content,
+                                        resolve_relative_uris=False)
                 return feed
             else:
                 log.warning(f"Failed to fetch RSS for {twitter_handle}: HTTP {response.status}")
@@ -929,7 +904,7 @@ async def send_to_discord_with_media(session: ClientSession,
     """
     Send tweet to Discord with proper video/embed separation.
     Step 1: Send video (uploaded if <10MB, URL if >10MB)
-    Step 2: Send embed with images
+    Step 2: Send embed with images (if generateEmbed is True) OR just content
     """
     content = tweet_link
     if main_config.config.useFxTwitterLinkInDiscord:
@@ -978,54 +953,68 @@ async def send_to_discord_with_media(session: ClientSession,
                         log.error(f"❌ Failed to post video. HTTP {video_response.status_code}")
                         all_success = False
 
-            # === STEP 2: Send embed with images ===
-            webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
+            # === STEP 2: Send content with or without embed ===
+            if main_config.config.generateEmbed:
+                # Send with embed (original behavior)
+                log.info("Sending with embed (generateEmbed=True)")
+                webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
 
-            # Attach author icon
-            if payload.author_icon_data:
-                webhook.add_file(file=payload.author_icon_data, filename=payload.author_icon_filename)
-                author_icon_url = f"attachment://{payload.author_icon_filename}"
-            else:
-                author_icon_url = twitter_user.icon
+                # Attach author icon
+                if payload.author_icon_data:
+                    webhook.add_file(file=payload.author_icon_data, filename=payload.author_icon_filename)
+                    author_icon_url = f"attachment://{payload.author_icon_filename}"
+                else:
+                    author_icon_url = twitter_user.icon
 
-            # Attach all images
-            for media in payload.all_attachments:
-                webhook.add_file(file=media.data, filename=media.filename)
+                # Attach all images
+                for media in payload.all_attachments:
+                    webhook.add_file(file=media.data, filename=media.filename)
 
-            # Create embeds
-            if payload.images:
-                for idx, media in enumerate(payload.images):
-                    is_first = idx == 0
+                # Create embeds
+                if payload.images:
+                    for idx, media in enumerate(payload.images):
+                        is_first = idx == 0
+                        embed = generate_embed_data(
+                            title=payload.cleaned_description if is_first else "",
+                            payload=payload,
+                            timestamp=timestamp if is_first else None,
+                            author_name=twitter_user.name if is_first else None,
+                            author_url=twitter_user.link if is_first else None,
+                            author_icon_url=author_icon_url if is_first else None
+                        )
+                        embed.set_image(url=f"attachment://{media.filename}")
+                        embed.set_url(tweet_link)
+                        webhook.add_embed(embed)
+                else:
+                    # No images, just text embed
                     embed = generate_embed_data(
-                        title=payload.cleaned_description if is_first else "",
+                        title=payload.cleaned_description,
                         payload=payload,
-                        timestamp=timestamp if is_first else None,
-                        author_name=twitter_user.name if is_first else None,
-                        author_url=twitter_user.link if is_first else None,
-                        author_icon_url=author_icon_url if is_first else None
+                        timestamp=timestamp,
+                        author_name=twitter_user.name,
+                        author_url=twitter_user.link,
+                        author_icon_url=author_icon_url
                     )
-                    embed.set_image(url=f"attachment://{media.filename}")
                     embed.set_url(tweet_link)
                     webhook.add_embed(embed)
-            else:
-                # No images, just text embed
-                embed = generate_embed_data(
-                    title=payload.cleaned_description,
-                    payload=payload,
-                    timestamp=timestamp,
-                    author_name=twitter_user.name,
-                    author_url=twitter_user.link,
-                    author_icon_url=author_icon_url
-                )
-                embed.set_url(tweet_link)
-                webhook.add_embed(embed)
 
-            response = webhook.execute()
-            if response.ok:
-                log.info(f"✅ Embed posted successfully")
+                response = webhook.execute()
+                if response.ok:
+                    log.info(f"✅ Embed posted successfully")
+                else:
+                    log.error(f"❌ Failed to post embed. HTTP {response.status_code}")
+                    all_success = False
             else:
-                log.error(f"❌ Failed to post embed. HTTP {response.status_code}")
-                all_success = False
+                # Send just content without embed (simple mode)
+                log.info("Sending without embed (generateEmbed=False)")
+                webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
+
+                response = webhook.execute()
+                if response.ok:
+                    log.info(f"✅ Content posted successfully")
+                else:
+                    log.error(f"❌ Failed to post content. HTTP {response.status_code}")
+                    all_success = False
 
         except Exception as webhook_error:
             log.error(f"❌ Error sending to webhook: {webhook_error}")
@@ -1131,7 +1120,7 @@ async def main():
                         description=data.description,
                         link=replace_url_to_twitter(data.link, __twitter_url),
                         pubdate=pub_date,
-                        timestamp=generate_timestamp(data.published),
+                        timestamp=pub_date.timestamp(),
                         key=item.twitterHandleName,
                         mediaList=extracted_media,
                         hasVideo=video_detected
