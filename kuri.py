@@ -25,7 +25,7 @@ from bs4 import BeautifulSoup
 from discord_webhook import DiscordEmbed, DiscordWebhook
 from feedparser import FeedParserDict
 from loguru import logger as log
-# Keep lxml import — used in RSS patching
+# Keep lxml import – used in RSS patching
 # noinspection PyUnresolvedReferences
 from lxml import etree
 from mashumaro.mixins.json import DataClassJSONMixin
@@ -168,6 +168,9 @@ __discord_maximum_file_size: int = 10
 # JSONFile
 __json_file: str = 'kuri.config.json'
 __last_run_file: str = os.path.join(script_dir, 'last_run.txt')
+
+# ===== OPTIMIZATION: IN-MEMORY CACHES =====
+_author_icon_cache = {}  # Cache author profile pictures
 
 
 # Dataclasses
@@ -390,29 +393,50 @@ def replace_nitter_url_to_twitter_url(input_string: str) -> str:
     return return_string
 
 
-async def check_video_size(session: ClientSession, url: str,
-                           max_size: int = convert_mb_to_bytes(__discord_maximum_file_size)) -> Optional[int]:
+async def download_video_smart(session: ClientSession, url: str,
+                               max_size: int = convert_mb_to_bytes(__discord_maximum_file_size)) -> tuple[
+    Optional[bytes], bool]:
     """
-    Check Content-Length of video without downloading.
-    Returns size in bytes if available and under limit, None otherwise.
+    OPTIMIZED: Download video with streaming size check (no HEAD request needed).
+    Returns: (data, was_too_large)
+    - If video is small: returns (bytes, False)
+    - If video is too large: returns (None, True)
+    - If error: returns (None, False)
     """
     try:
-        async with session.head(url, timeout=ClientTimeout(total=10), allow_redirects=True) as response:
-            if response.ok:
-                content_length = response.headers.get('Content-Length')
-                if content_length:
-                    size = int(content_length)
-                    log.info(f"Video size: {convert_bytes_to_mb(size):.2f}MB")
-                    return size if size <= max_size else None
-                else:
-                    log.warning("No Content-Length header found")
-                    return None
-            else:
-                log.warning(f"HEAD request failed: HTTP {response.status}")
-                return None
+        async with session.get(url, timeout=ClientTimeout(total=30)) as response:
+            if not response.ok:
+                log.warning(f"Failed to fetch video: HTTP {response.status}")
+                return None, False
+
+            # Check Content-Length first if available
+            content_length = response.headers.get('Content-Length')
+            if content_length:
+                size = int(content_length)
+                log.info(f"Video size from header: {convert_bytes_to_mb(size):.2f}MB")
+                if size > max_size:
+                    log.info(f"Video too large ({convert_bytes_to_mb(size):.2f}MB), skipping download")
+                    return None, True
+
+            # Stream download with size limit
+            chunks = []
+            downloaded = 0
+            async for chunk in response.content.iter_chunked(256 * 1024):  # 256KB chunks
+                chunks.append(chunk)
+                downloaded += len(chunk)
+                if downloaded > max_size:
+                    log.warning(f"Video exceeded {__discord_maximum_file_size}MB during download, aborting")
+                    return None, True
+
+            log.info(f"✅ Video downloaded: {convert_bytes_to_mb(downloaded):.2f}MB")
+            return b''.join(chunks), False
+
+    except asyncio.TimeoutError:
+        log.error(f"Timeout downloading video: {url}")
+        return None, False
     except Exception as e:
-        log.error(f"Error checking video size: {e}")
-        return None
+        log.error(f"Error downloading video: {e}")
+        return None, False
 
 
 def extract_video_url_from_nitter(nitter_video_url: str) -> str:
@@ -728,6 +752,25 @@ async def download_media(session: ClientSession, url: str, max_size: int = conve
         return None
 
 
+async def get_author_icon(session: ClientSession, url: str) -> Optional[bytes]:
+    """
+    OPTIMIZED: Cache author icons to avoid re-downloading same profile pictures.
+    Returns cached data if available, otherwise downloads and caches.
+    """
+    if url in _author_icon_cache:
+        log.debug(f"✅ Using cached author icon: {url}")
+        return _author_icon_cache[url]
+
+    log.info(f"Downloading new author icon: {url}")
+    data = await download_media(session, url, max_size=convert_mb_to_bytes(5))
+
+    if data:
+        _author_icon_cache[url] = data
+        log.debug(f"Cached author icon for future use")
+
+    return data
+
+
 async def fetch_video_from_fxtwitter(session: ClientSession, tweet_link: str) -> Optional[str]:
     """Fetch video URL from fxtwitter meta tags"""
     fx_url = tweet_link.replace(__twitter_url, __fxtwitter_url)
@@ -770,7 +813,7 @@ async def generate_media_webhook(
 ) -> WebhookMediaPayload:
     """
     Generate media webhook data with async downloads.
-    Returns strongly-typed payload with clear separation between videos and images.
+    OPTIMIZED: Uses cached author icons and smart video download (no HEAD request).
     """
     max_file_size = convert_mb_to_bytes(__discord_maximum_file_size)
     payload = WebhookMediaPayload()
@@ -802,39 +845,29 @@ async def generate_media_webhook(
                 video_url = None
 
         if video_url:
-            # Check video size
-            log.info("Checking video size...")
-            video_size = await check_video_size(session, video_url, max_size=max_file_size)
-
+            # OPTIMIZED: Use smart download (no separate HEAD request)
+            log.info("Downloading video with smart size check...")
             filename = generate_media_filename(video_url)
 
-            if video_size is not None:
-                # Video is under 10MB, download it
-                log.info(f"Video is under 10MB ({video_size / 1024 / 1024:.2f}MB), downloading...")
-                video_data = await download_media(session, video_url, max_size=max_file_size)
+            video_data, was_too_large = await download_video_smart(session, video_url, max_size=max_file_size)
 
-                if video_data:
-                    downloaded_video = DownloadedMedia(
-                        filename=filename,
-                        data=video_data,
-                        media_type=MediaType.VIDEO_URL,
-                        original_url=video_url
-                    )
-                    payload.videos.append(downloaded_video)
-                    log.info(f"✅ Video downloaded successfully: {filename}")
-                else:
-                    # Download failed, store URL only
-                    log.warning("Failed to download video, will use URL only")
-                    url_only_video = DownloadedMedia(
-                        filename=filename,
-                        data=None,
-                        media_type=MediaType.VIDEO_URL,
-                        original_url=video_url
-                    )
-                    payload.videos.append(url_only_video)
+            if video_data:
+                # Video downloaded successfully
+                downloaded_video = DownloadedMedia(
+                    filename=filename,
+                    data=video_data,
+                    media_type=MediaType.VIDEO_URL,
+                    original_url=video_url
+                )
+                payload.videos.append(downloaded_video)
+                log.info(f"✅ Video downloaded successfully: {filename}")
             else:
-                # Video is over 10MB, store URL only
-                log.info("Video is over 10MB or size unknown, will use URL only")
+                # Video too large or download failed, store URL only
+                if was_too_large:
+                    log.info("Video is over 10MB, will use URL only")
+                else:
+                    log.warning("Failed to download video, will use URL only")
+
                 url_only_video = DownloadedMedia(
                     filename=filename,
                     data=None,
@@ -849,10 +882,10 @@ async def generate_media_webhook(
     download_tasks = []
     task_metadata = []
 
-    # Task: Author icon
+    # Task: Author icon (OPTIMIZED: uses cache)
     if twitter_user.icon:
         log.info(f"Queueing author icon download: {twitter_user.icon}")
-        download_tasks.append(download_media(session, twitter_user.icon, max_size=convert_mb_to_bytes(5)))
+        download_tasks.append(get_author_icon(session, twitter_user.icon))
         task_metadata.append((MediaType.AUTHOR_ICON, twitter_user.icon))
 
     # Tasks: Images (always download)
@@ -919,6 +952,119 @@ async def generate_media_webhook(
     return payload
 
 
+async def post_to_single_webhook(
+        session: ClientSession,
+        webhook_url: str,
+        content: str,
+        tweet_link: str,
+        payload: WebhookMediaPayload,
+        timestamp: float,
+        twitter_user: TwitterUser
+) -> bool:
+    """
+    OPTIMIZED: Post to a single webhook (videos + embed).
+    Extracted for parallel execution across multiple webhooks.
+    """
+    try:
+        log.info(f"Processing webhook: {webhook_url[:50]}...")
+
+        # === STEP 1: Send videos first ===
+        if payload.videos:
+            log.info(f"📹 Sending {len(payload.videos)} video(s)...")
+            for video in payload.videos:
+                video_webhook = DiscordWebhook(
+                    url=webhook_url,
+                    rate_limit_retry=True
+                )
+
+                if video.data:
+                    # Video was downloaded, upload as file
+                    log.info(f"Uploading video as file: {video.filename}")
+                    video_webhook.content = __video_upload_content
+                    video_webhook.add_file(file=video.data, filename=video.filename)
+                else:
+                    # Video too large or download failed, send URL
+                    log.info(f"Sending video URL: {video.original_url}")
+                    video_webhook.content = __video_embed_content.format(video.original_url)
+
+                video_response = video_webhook.execute()
+
+                if video_response.ok:
+                    log.info(f"✅ Video posted: {video.filename}")
+                else:
+                    log.error(f"❌ Failed to post video. HTTP {video_response.status_code}")
+                    return False
+
+        # === STEP 2: Send content with or without embed ===
+        if main_config.config.generateEmbed:
+            # Send with embed (original behavior)
+            log.info("Sending with embed (generateEmbed=True)")
+            webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
+
+            # Attach author icon
+            if payload.author_icon_data:
+                webhook.add_file(file=payload.author_icon_data, filename=payload.author_icon_filename)
+                author_icon_url = f"attachment://{payload.author_icon_filename}"
+            else:
+                author_icon_url = twitter_user.icon
+
+            # Attach all images
+            for media in payload.all_attachments:
+                webhook.add_file(file=media.data, filename=media.filename)
+
+            # Create embeds
+            if payload.images:
+                for idx, media in enumerate(payload.images):
+                    is_first = idx == 0
+                    embed = generate_embed_data(
+                        title=payload.cleaned_description if is_first else "",
+                        payload=payload,
+                        timestamp=timestamp if is_first else None,
+                        author_name=twitter_user.name if is_first else None,
+                        author_url=twitter_user.link if is_first else None,
+                        author_icon_url=author_icon_url if is_first else None
+                    )
+                    embed.set_image(url=f"attachment://{media.filename}")
+                    embed.set_url(tweet_link)
+                    webhook.add_embed(embed)
+            else:
+                # No images, just text embed
+                embed = generate_embed_data(
+                    title=payload.cleaned_description,
+                    payload=payload,
+                    timestamp=timestamp,
+                    author_name=twitter_user.name,
+                    author_url=twitter_user.link,
+                    author_icon_url=author_icon_url
+                )
+                embed.set_url(tweet_link)
+                webhook.add_embed(embed)
+
+            response = webhook.execute()
+            if response.ok:
+                log.info(f"✅ Embed posted successfully")
+                return True
+            else:
+                log.error(f"❌ Failed to post embed. HTTP {response.status_code}")
+                return False
+        else:
+            # Send just content without embed (simple mode)
+            log.info("Sending without embed (generateEmbed=False)")
+            webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
+
+            response = webhook.execute()
+            if response.ok:
+                log.info(f"✅ Content posted successfully")
+                return True
+            else:
+                log.error(f"❌ Failed to post content. HTTP {response.status_code}")
+                return False
+
+    except Exception as webhook_error:
+        log.error(f"❌ Error sending to webhook: {webhook_error}")
+        return False
+
+
 async def send_to_discord_with_media(session: ClientSession,
                                      tweet_link: str,
                                      embed_title: str,
@@ -928,9 +1074,8 @@ async def send_to_discord_with_media(session: ClientSession,
                                      twitter_user: TwitterUser
                                      ) -> bool:
     """
-    Send tweet to Discord with proper video/embed separation.
-    Step 1: Send video (uploaded if <10MB, URL if >10MB)
-    Step 2: Send embed with images (if generateEmbed is True) OR just content
+    OPTIMIZED: Send tweet to Discord with parallel webhook posting.
+    If multiple webhooks exist, posts to all concurrently.
     """
     content = tweet_link
     if main_config.config.useFxTwitterLinkInDiscord:
@@ -940,119 +1085,43 @@ async def send_to_discord_with_media(session: ClientSession,
         mentions = ' '.join([f'<@&{role_id}>' for role_id in twitter_user.discordMentionRoleId])
         content = f'{content}\n{mentions}'
 
-    all_success = True
+    # Generate payload once (shared across all webhooks)
+    payload = await generate_media_webhook(
+        session, tweet_link, embed_title, tweet_media_list,
+        tweet_has_video, twitter_user
+    )
 
-    for webhook_url in twitter_user.webhookUrl:
-        try:
-            log.info(f"Processing webhook: {webhook_url[:50]}...")
-
-            # Generate payload
-            payload = await generate_media_webhook(
-                session, tweet_link, embed_title, tweet_media_list,
-                tweet_has_video, twitter_user
+    # OPTIMIZED: Post to all webhooks in parallel
+    if len(twitter_user.webhookUrl) > 1:
+        log.info(f"🚀 Posting to {len(twitter_user.webhookUrl)} webhooks in parallel...")
+        webhook_tasks = [
+            post_to_single_webhook(
+                session, webhook_url, content, tweet_link,
+                payload, timestamp, twitter_user
             )
+            for webhook_url in twitter_user.webhookUrl
+        ]
 
-            # === STEP 1: Send videos first ===
-            if payload.videos:
-                log.info(f"📹 Sending {len(payload.videos)} video(s)...")
-                for video in payload.videos:
-                    video_webhook = DiscordWebhook(
-                        url=webhook_url,
-                        rate_limit_retry=True
-                    )
+        results = await asyncio.gather(*webhook_tasks, return_exceptions=True)
 
-                    if video.data:
-                        # Video was downloaded, upload as file
-                        log.info(f"Uploading video as file: {video.filename}")
-                        video_webhook.content = __video_upload_content
-                        video_webhook.add_file(file=video.data, filename=video.filename)
-                    else:
-                        # Video too large or download failed, send URL
-                        log.info(f"Sending video URL: {video.original_url}")
-                        video_webhook.content = __video_embed_content.format(video.original_url)
+        # Check if all succeeded
+        success_count = sum(1 for r in results if r is True)
+        log.info(f"✅ Posted to {success_count}/{len(twitter_user.webhookUrl)} webhooks successfully")
 
-                    video_response = video_webhook.execute()
-
-                    if video_response.ok:
-                        log.info(f"✅ Video posted: {video.filename}")
-                    else:
-                        log.error(f"❌ Failed to post video. HTTP {video_response.status_code}")
-                        all_success = False
-
-            # === STEP 2: Send content with or without embed ===
-            if main_config.config.generateEmbed:
-                # Send with embed (original behavior)
-                log.info("Sending with embed (generateEmbed=True)")
-                webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
-
-                # Attach author icon
-                if payload.author_icon_data:
-                    webhook.add_file(file=payload.author_icon_data, filename=payload.author_icon_filename)
-                    author_icon_url = f"attachment://{payload.author_icon_filename}"
-                else:
-                    author_icon_url = twitter_user.icon
-
-                # Attach all images
-                for media in payload.all_attachments:
-                    webhook.add_file(file=media.data, filename=media.filename)
-
-                # Create embeds
-                if payload.images:
-                    for idx, media in enumerate(payload.images):
-                        is_first = idx == 0
-                        embed = generate_embed_data(
-                            title=payload.cleaned_description if is_first else "",
-                            payload=payload,
-                            timestamp=timestamp if is_first else None,
-                            author_name=twitter_user.name if is_first else None,
-                            author_url=twitter_user.link if is_first else None,
-                            author_icon_url=author_icon_url if is_first else None
-                        )
-                        embed.set_image(url=f"attachment://{media.filename}")
-                        embed.set_url(tweet_link)
-                        webhook.add_embed(embed)
-                else:
-                    # No images, just text embed
-                    embed = generate_embed_data(
-                        title=payload.cleaned_description,
-                        payload=payload,
-                        timestamp=timestamp,
-                        author_name=twitter_user.name,
-                        author_url=twitter_user.link,
-                        author_icon_url=author_icon_url
-                    )
-                    embed.set_url(tweet_link)
-                    webhook.add_embed(embed)
-
-                response = webhook.execute()
-                if response.ok:
-                    log.info(f"✅ Embed posted successfully")
-                else:
-                    log.error(f"❌ Failed to post embed. HTTP {response.status_code}")
-                    all_success = False
-            else:
-                # Send just content without embed (simple mode)
-                log.info("Sending without embed (generateEmbed=False)")
-                webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
-
-                response = webhook.execute()
-                if response.ok:
-                    log.info(f"✅ Content posted successfully")
-                else:
-                    log.error(f"❌ Failed to post content. HTTP {response.status_code}")
-                    all_success = False
-
-        except Exception as webhook_error:
-            log.error(f"❌ Error sending to webhook: {webhook_error}")
-            all_success = False
-            continue
-
-    return all_success
+        return success_count > 0  # Return True if at least one webhook succeeded
+    else:
+        # Single webhook, post directly
+        return await post_to_single_webhook(
+            session, twitter_user.webhookUrl[0], content, tweet_link,
+            payload, timestamp, twitter_user
+        )
 
 
 async def main():
-    """Main async function"""
+    """Main async function with performance timing"""
     try:
+        script_start = time.time()
+
         # Read last run timestamp
         cutoff_time = read_last_run()
         log.info(f"Filtering entries published AFTER: {cutoff_time} (UTC)")
@@ -1092,7 +1161,9 @@ async def main():
 
             # Fetch all feeds concurrently
             log.info(f"Fetching {len(feed_tasks)} RSS feeds concurrently...")
+            rss_start = time.time()
             feed_results = await asyncio.gather(*feed_tasks, return_exceptions=True)
+            log.info(f"⏱️ RSS fetch took: {time.time() - rss_start:.2f}s")
 
             # Process feed results
             for item, feedParse in zip(main_config.twitterWatch, feed_results):
@@ -1166,6 +1237,8 @@ async def main():
             posted_count = 0
             latest_successful_pubdate = None
 
+            post_start = time.time()
+
             for data in entry_data:
                 twitter_user = next((item for item in twitter_user_list if item.key == data.key), None)
                 if not twitter_user:
@@ -1193,6 +1266,7 @@ async def main():
                     log.error(f"Error posting to Discord: {post_error}")
                     continue
 
+            log.info(f"⏱️ Discord posting took: {time.time() - post_start:.2f}s")
             log.info(f"Successfully posted {posted_count}/{len(entry_data)} tweets")
 
             # Update last_run.txt
@@ -1204,6 +1278,8 @@ async def main():
             else:
                 log.info("No new entries found, checkpoint unchanged")
 
+            log.info(f"⏱️ Total script execution time: {time.time() - script_start:.2f}s")
+            log.info(f"📊 Cache stats: {len(_author_icon_cache)} author icons cached")
             log.info("Script completed successfully")
 
     except Exception as main_error:
