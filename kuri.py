@@ -603,8 +603,16 @@ def clean_tweet_description(html_content: str) -> str:
     3. Replacing nitter URLs with x.com
     4. Showing full URLs without protocol ONLY for truncated links (containing ...)
     5. Keeping hashtag and mention links with their original text
+    6. Keeping protocol for specific domains in the exclusion list
     """
     soup = BeautifulSoup(html_content, 'lxml')
+
+    # List of domains that should keep the protocol in display text
+    # Fixing the discord invite on embed, it's not parsed with discord Markdown link
+    keep_protocol_domains = [
+        'discord.gg',
+        'discord.com',
+    ]
 
     # Remove images and videos first
     for tag in soup.find_all(['img', 'video', 'source']):
@@ -626,20 +634,23 @@ def clean_tweet_description(html_content: str) -> str:
         href = replace_nitter_url_to_twitter_url(href)
 
         # Determine display text
+        # Check if domain should keep protocol
+        should_keep_protocol = any(domain in href for domain in keep_protocol_domains)
+
+        # Determine display text
         # Only replace with full URL if the link text contains ellipsis (...)
         if '…' in link_text or '...' in link_text:
-            # Show full URL without protocol
             display_text = href.replace('https://', '').replace('http://', '')
         else:
             # Keep original text (for hashtags, mentions, etc.)
             display_text = link_text
 
-        # Replace the link with Discord Markdown format
-        link.replace_with(f'[{display_text}]({href})')
 
-    # Convert <br> to newlines
-    # for br in soup.find_all('br'):
-    #     br.replace_with('\n')
+        if should_keep_protocol:
+            link.replace_with(href)
+        else:
+            # Replace the link with Discord Markdown format
+            link.replace_with(f'[{display_text}]({href})')
 
     # Remove all remaining hashtag links (we'll recreate them)
     for link in soup.find_all('a'):
