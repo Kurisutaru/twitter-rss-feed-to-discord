@@ -192,4 +192,4 @@ fabric.properties
 kuri.db
 kuri.config.json
 *.zip
-last_run.txt
+last_run.json

@@ -5,8 +5,10 @@ import hashlib
 import os
 import random
 import re
+import shutil
 import signal
 import sys
+import tempfile
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -20,6 +22,7 @@ from urllib.parse import urljoin, unquote, urlparse
 
 import dateutil.parser
 import feedparser
+import orjson
 from aiohttp import ClientSession, TCPConnector, ClientTimeout
 from bs4 import BeautifulSoup
 from discord_webhook import DiscordEmbed, DiscordWebhook
@@ -167,7 +170,7 @@ __discord_maximum_file_size: int = 10
 
 # JSONFile
 __json_file: str = 'kuri.config.json'
-__last_run_file: str = os.path.join(script_dir, 'last_run.txt')
+__last_run_file: str = os.path.join(script_dir, 'last_run.json')
 
 # ===== OPTIMIZATION: IN-MEMORY CACHES =====
 _author_icon_cache = {}  # Cache author profile pictures
@@ -339,6 +342,118 @@ def write_last_run(timestamp: datetime, filename: str = __last_run_file):
         log.info(f"Updated last processed tweet timestamp: {timestamp} (UTC)")
     except Exception as write_error:
         log.error(f"Error writing last run timestamp: {write_error}")
+
+
+def read_last_run_per_handler(filename: str = __last_run_file) -> dict[str, datetime]:
+    """
+    Read per-handler timestamps from JSON file using orjson.
+    Returns dict mapping handler name -> last processed datetime (UTC, timezone-naive).
+    """
+    try:
+        if os.path.exists(filename):
+            with open(filename, 'rb') as file:
+                data = orjson.loads(file.read())
+
+            result = {}
+            for handler, timestamp_str in data.items():
+                # CHANGED: Use dateutil.parser instead of datetime.fromisoformat
+                dt = dateutil.parser.parse(timestamp_str)
+
+                # Normalize to UTC timezone-naive
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                result[handler] = dt
+
+            log.info(f"Loaded checkpoints for {len(result)} handlers")
+            return result
+        else:
+            log.info("No last_run.json found, starting fresh for all handlers")
+            return {}
+    except Exception as e:
+        log.error(f"Error reading checkpoints: {e}, using empty dict")
+        return {}
+
+
+def write_last_run_per_handler(checkpoints: dict[str, datetime], filename: str = __last_run_file):
+    """
+    Write per-handler timestamps to JSON file with atomic write pattern.
+    Prevents corruption if script crashes during write.
+    """
+    try:
+        # Prepare data: convert datetime to ISO strings
+        data = {}
+        for handler, dt in checkpoints.items():
+            # Ensure UTC timezone-naive
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            data[handler] = dt.isoformat()
+
+        # Get directory for temp file (must be same filesystem for atomic rename)
+        file_dir = os.path.dirname(filename) or script_dir
+
+        # Create temp file in same directory
+        fd, temp_path = tempfile.mkstemp(
+            suffix='.tmp',
+            prefix='last_run_',
+            dir=file_dir,
+            text=False  # Binary mode for orjson
+        )
+
+        try:
+            # Write to temp file
+            with os.fdopen(fd, 'wb') as temp_file:
+                temp_file.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
+
+            # Atomic rename (replaces old file)
+            shutil.move(temp_path, filename)
+
+            log.info(f"✅ Atomically updated checkpoints for {len(checkpoints)} handlers")
+
+        except Exception as write_error:
+            # Clean up temp file on failure
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise write_error
+
+    except Exception as e:
+        log.error(f"Error writing checkpoints: {e}")
+
+
+def migrate_old_checkpoint():
+    """
+    One-time migration from single-file last_run.txt to per-handler last_run.json.
+    Safe to run multiple times - only migrates if old file exists and new doesn't.
+    """
+    old_file = os.path.join(script_dir, 'last_run.txt')
+    new_file = os.path.join(script_dir, 'last_run.json')
+
+    if os.path.exists(old_file) and not os.path.exists(new_file):
+        try:
+            log.info("Found old last_run.txt, migrating to per-handler format...")
+
+            # Read old timestamp using existing function
+            old_timestamp = read_last_run(old_file)
+
+            # Apply to all handlers
+            checkpoints = {
+                item.twitterHandleName: old_timestamp
+                for item in main_config.twitterWatch
+            }
+
+            # Write new format
+            write_last_run_per_handler(checkpoints, new_file)
+
+            log.info(f"✅ Migrated checkpoint to per-handler format for {len(checkpoints)} handlers")
+
+            # Backup old file
+            backup_file = old_file + '.backup'
+            shutil.move(old_file, backup_file)
+            log.info(f"Backed up old file to {backup_file}")
+
+        except Exception as e:
+            log.error(f"Failed to migrate old checkpoint: {e}")
 
 
 def generate_timestamp(input_time: Union["time.struct_time", str]) -> int:
@@ -644,7 +759,6 @@ def clean_tweet_description(html_content: str) -> str:
         else:
             # Keep original text (for hashtags, mentions, etc.)
             display_text = link_text
-
 
         if should_keep_protocol:
             link.replace_with(href)
@@ -1133,9 +1247,11 @@ async def main():
     try:
         script_start = time.time()
 
-        # Read last run timestamp
-        cutoff_time = read_last_run()
-        log.info(f"Filtering entries published AFTER: {cutoff_time} (UTC)")
+        # Config Migration
+        migrate_old_checkpoint()
+
+        # CHANGED: Read per-handler checkpoints instead of single timestamp
+        checkpoints = read_last_run_per_handler()  # dict[handler -> datetime]
 
         # Create aiohttp session with optimized settings
         connector = TCPConnector(
@@ -1152,14 +1268,12 @@ async def main():
                 connector=connector,
                 timeout=timeout,
                 headers={
-                    # needed fetch_video_from_fxtwitter, if I put browser agent, it just redirects
                     'User-Agent': 'curl/8.16.0',
                     'Accept-Encoding': 'gzip, deflate',
                     'Connection': 'keep-alive',
                 }
         ) as session:
 
-            # Fetch all RSS feeds concurrently
             twitter_user_list: List[TwitterUser] = []
             entry_data: List[EntryData] = []
 
@@ -1186,12 +1300,17 @@ async def main():
                     log.warning(f"Invalid or empty feed for {item.twitterHandleName}")
                     continue
 
+                # CHANGED: Get cutoff time for THIS specific handler
+                handler_name = item.twitterHandleName
+                cutoff_time = checkpoints.get(handler_name, datetime(2000, 1, 1))
+                log.info(f"Processing {handler_name}, cutoff: {cutoff_time} (UTC)")
+
                 # Add to twitter_user_list
                 if hasattr(feedParse.feed, 'image'):
                     twitter_user_list.append(
                         generate_twitter_user_from_rss(
                             feed_data=feedParse,
-                            key=item.twitterHandleName,
+                            key=handler_name,
                             webhook_url=item.webhookUrl,
                             discord_mention=item.discordMention,
                             discord_mention_role_id=item.discordMentionRoleId
@@ -1200,10 +1319,10 @@ async def main():
                 else:
                     twitter_user_list.append(
                         TwitterUser(
-                            name=item.twitterHandleName,
-                            link=f"{__twitter_url}/{item.twitterHandleName}",
+                            name=handler_name,
+                            link=f"{__twitter_url}/{handler_name}",
                             icon="",
-                            key=item.twitterHandleName,
+                            key=handler_name,
                             webhookUrl=item.webhookUrl,
                             discordMention=item.discordMention,
                             discordMentionRoleId=item.discordMentionRoleId
@@ -1215,6 +1334,7 @@ async def main():
                     pub_date = dateutil.parser.parse(timestr=data.published)
                     pub_date = normalize_datetime_to_utc_naive(pub_date)
 
+                    # CHANGED: Compare against THIS handler's cutoff time
                     if pub_date <= cutoff_time:
                         continue
 
@@ -1229,7 +1349,7 @@ async def main():
                         link=replace_url_to_twitter(data.link, __twitter_url),
                         pubdate=pub_date,
                         timestamp=generate_timestamp(data.published_parsed),
-                        key=item.twitterHandleName,
+                        key=handler_name,
                         mediaList=extracted_media,
                         hasVideo=video_detected
                     )
@@ -1246,7 +1366,8 @@ async def main():
 
             # Post to Discord
             posted_count = 0
-            latest_successful_pubdate = None
+            # CHANGED: Track latest post per handler
+            latest_by_handler: dict[str, datetime] = {}
 
             post_start = time.time()
 
@@ -1257,7 +1378,7 @@ async def main():
                     continue
 
                 try:
-                    log.info(f"Posting tweet from {data.pubdate}: {data.link}")
+                    log.info(f"Posting tweet from {data.key} at {data.pubdate}: {data.link}")
                     success = await send_to_discord_with_media(
                         session=session,
                         tweet_link=data.link,
@@ -1270,8 +1391,12 @@ async def main():
 
                     if success:
                         posted_count += 1
-                        latest_successful_pubdate = data.pubdate
-                        log.info(f"✅ Successfully posted tweet from {data.pubdate}")
+
+                        # CHANGED: Track latest successful post per handler
+                        if data.key not in latest_by_handler or data.pubdate > latest_by_handler[data.key]:
+                            latest_by_handler[data.key] = data.pubdate
+
+                        log.info(f"✅ Successfully posted tweet from {data.key} at {data.pubdate}")
 
                 except Exception as post_error:
                     log.error(f"Error posting to Discord: {post_error}")
@@ -1280,10 +1405,15 @@ async def main():
             log.info(f"⏱️ Discord posting took: {time.time() - post_start:.2f}s")
             log.info(f"Successfully posted {posted_count}/{len(entry_data)} tweets")
 
-            # Update last_run.txt
-            if latest_successful_pubdate:
-                write_last_run(latest_successful_pubdate)
-                log.info(f"✅ Updated checkpoint to latest posted tweet: {latest_successful_pubdate}")
+            # CHANGED: Update per-handler checkpoints
+            if latest_by_handler:
+                # Merge with existing checkpoints (don't lose other handlers)
+                updated_checkpoints = {**checkpoints, **latest_by_handler}
+                write_last_run_per_handler(updated_checkpoints)
+
+                log.info(f"✅ Updated checkpoints for {len(latest_by_handler)} handlers:")
+                for handler, timestamp in latest_by_handler.items():
+                    log.info(f"  - {handler}: {timestamp}")
             elif entry_data and posted_count == 0:
                 log.warning("⚠️ Had entries but failed to post any - NOT updating checkpoint")
             else:
