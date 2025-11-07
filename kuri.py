@@ -488,6 +488,27 @@ def convert_bytes_to_mb(input_mb: int) -> float:
     return input_mb / 1024 / 1024
 
 
+def truncate_text(text, limit=2000):
+    """
+    Truncate text to fit Discord webhook message limits.
+    For Twitter posts that exceed Discord's character limit.
+
+    Args:
+        text (str): The text to truncate
+        limit (int): Maximum length including the footer message (default: 2000)
+
+    Returns:
+        str: Truncated text with continuation message if it exceeds the limit
+    """
+    footer = '\n\n...\n📄 Tweet content too long. Read the full post on Twitter.'
+
+    if len(text) <= limit:
+        return text
+
+    # Reserve space for the footer message
+    truncate_at = limit - len(footer)
+    return text[:truncate_at] + footer
+
 def generate_rss_url(twitter_handle_name: str, nitter_url: str) -> str:
     """Generate RSS feed URL for a Twitter user"""
     return __rss_template.format(nitter_url, twitter_handle_name)
@@ -944,7 +965,7 @@ async def generate_media_webhook(
     payload = WebhookMediaPayload()
 
     # Clean description first
-    payload.cleaned_description = clean_tweet_description(title)
+    payload.cleaned_description = truncate_text(clean_tweet_description(title))
 
     # Separate media by type
     videos_from_rss = [m for m in tweet_media_list if m.type == 'video']
@@ -1170,7 +1191,7 @@ async def post_to_single_webhook(
                 log.info(f"✅ Embed posted successfully")
                 return True
             else:
-                log.error(f"❌ Failed to post embed. HTTP {response.status_code}")
+                log.error(f"❌ Failed to post embed. HTTP {response.status_code} + {response.reason}")
                 return False
         else:
             # Send just content without embed (simple mode)
