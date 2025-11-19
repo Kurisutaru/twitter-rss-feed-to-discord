@@ -167,6 +167,7 @@ __video_embed_content: str = f"{__emoji_play}[{__braille_pattern_blank}]({{}})"
 __video_upload_content: str = f"{__emoji_play}{__braille_pattern_blank}"
 __footer_append_template: str = ' • {}'
 __discord_maximum_file_size: int = 10
+__discord_maximum_embed_character: int = 4096
 
 # JSONFile
 __json_file: str = 'kuri.config.json'
@@ -488,26 +489,52 @@ def convert_bytes_to_mb(input_mb: int) -> float:
     return input_mb / 1024 / 1024
 
 
-def truncate_text(text, limit=2000):
+def truncate_text(text:str, tweet_link:str, limit=__discord_maximum_embed_character):
     """
     Truncate text to fit Discord webhook message limits.
     For Twitter posts that exceed Discord's character limit.
+    Truncates at the last paragraph or line break before the limit,
+    so it never cuts in the middle of a sentence/paragraph.
 
     Args:
         text (str): The text to truncate
-        limit (int): Maximum length including the footer message (default: 2000)
+        tweet_link (str): The link to the Twitter post
+        limit (int): Maximum length including the footer message (default: 4096)
 
     Returns:
         str: Truncated text with continuation message if it exceeds the limit
     """
-    footer = '\n\n...\n📄 Tweet content too long. Read the full post on Twitter.'
+    footer = f'\n\n...\n📄 [Full post: View on X]({tweet_link})'
 
     if len(text) <= limit:
         return text
 
-    # Reserve space for the footer message
-    truncate_at = limit - len(footer)
-    return text[:truncate_at] + footer
+    available = limit - len(footer)
+
+    # Regex: lines that start with emoji (including regional indicators, stars, hearts, etc.)
+    # or common bullets used in these tweets
+    # Matches any line that starts with emoji(s) or common bullets
+    # This covers ⭐ ❤️ 🧡 ◆ ▶ ★ ☆ ✨ ❗ ➡️ and literally any future emoji
+    section_start = re.compile(r'^[\u2600-\u26FF\u2700-\u27BF\U0001F300-\U0001F9FF\uFE0F]+', re.MULTILINE)
+
+    # Find all positions where a new big section starts
+    positions = [m.start() for m in section_start.finditer(text)]
+
+    if positions:
+        # From the end: take the last section we can fully include
+        for pos in reversed(positions):
+            if pos <= available:
+                return text[:pos].rstrip() + footer
+
+    # === Fallback: paragraph / line break (same as before) ===
+    cutoff = text.rfind('\n\n', 0, available)
+    if cutoff == -1:
+        cutoff = text.rfind('\n', 0, available)
+    if cutoff == -1:
+        cutoff = available
+
+    return text[:cutoff].rstrip() + footer
+
 
 def generate_rss_url(twitter_handle_name: str, nitter_url: str) -> str:
     """Generate RSS feed URL for a Twitter user"""
@@ -965,7 +992,7 @@ async def generate_media_webhook(
     payload = WebhookMediaPayload()
 
     # Clean description first
-    payload.cleaned_description = truncate_text(clean_tweet_description(title))
+    payload.cleaned_description = truncate_text(clean_tweet_description(title), tweet_link)
 
     # Separate media by type
     videos_from_rss = [m for m in tweet_media_list if m.type == 'video']
