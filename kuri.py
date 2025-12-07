@@ -643,7 +643,7 @@ def generate_twitter_embed_name(input_string: str) -> str:
 
 def generate_twitter_profile_picture_link(input_string: str) -> str:
     """Extract Twitter profile picture URL"""
-    return_string = urljoin('https://', unquote(urlparse(input_string).path)).replace('/pic/', '')
+    return_string = unquote(urlparse(input_string).path).replace('/pic/', '')
     return return_string
 
 
