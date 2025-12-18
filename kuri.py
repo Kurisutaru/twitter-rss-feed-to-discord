@@ -713,12 +713,16 @@ def generate_media_filename(url: str, index: int = 0) -> str:
     return f"twitter_media_{url_hash}.{ext}"
 
 
+
+
 def extract_media_from_description(description: str, twitter_card_template: str) -> tuple[List[TwitterMedia], bool]:
-    """Extract all assets URLs from RSS description."""
+    """Extract all media URLs from RSS description."""
     extracted_media_list = []
     video_detected = False
     soup = BeautifulSoup(description, 'lxml')
 
+    # === EXTRACT MEDIA FROM BLOCKQUOTES TOO ===
+    # Process ALL video elements (including those in blockquotes)
     video_elements = soup.find_all('video')
     if video_elements:
         video_detected = True
@@ -726,8 +730,6 @@ def extract_media_from_description(description: str, twitter_card_template: str)
             source = video.find('source')
             if source and source.get('src'):
                 video_url = source.get('src')
-
-                # Use new function to properly extract video URL
                 twitter_video_url = extract_video_url_from_nitter(video_url)
                 extracted_media_list.append(TwitterMedia(url=twitter_video_url, type='video'))
 
@@ -736,6 +738,7 @@ def extract_media_from_description(description: str, twitter_card_template: str)
                 twitter_img_url = generate_twitter_picture_link(poster, twitter_card_template)
                 extracted_media_list.append(TwitterMedia(url=twitter_img_url, type='video_thumbnail'))
 
+    # Process ALL images (including those in blockquotes)
     for img in soup.find_all('img'):
         img_src = img.get('src', '')
         if not img_src:
@@ -767,24 +770,39 @@ def clean_tweet_description(html_content: str) -> str:
     4. Showing full URLs without protocol ONLY for truncated links (containing ...)
     5. Keeping hashtag and mention links with their original text
     6. Keeping protocol for specific domains in the exclusion list
+    7. Converting blockquotes to Discord multi-line quote format (>>> prefix)
     """
     soup = BeautifulSoup(html_content, 'lxml')
 
     # List of domains that should keep the protocol in display text
-    # Fixing the discord invite on embed, it's not parsed with discord Markdown link
     keep_protocol_domains = [
         'discord.gg',
         'discord.com',
     ]
 
-    # Remove images and videos first
+    # === CONVERT <br> TO NEWLINES (but remove <br> inside links) ===
+    # Remove <br> tags that are inside <a> tags (they break Markdown links)
+    for link in soup.find_all('a'):
+        for br in link.find_all('br'):
+            br.decompose()
+
+    # === PROCESS BLOCKQUOTES FIRST (but keep structure for now) ===
+    blockquotes = soup.find_all('blockquote')
+    for blockquote in blockquotes:
+        # Mark blockquote with a special marker that survives text extraction
+        blockquote.insert(0, soup.new_string('\n__QUOTE_START__\n'))
+        blockquote.append(soup.new_string('\n__QUOTE_END__\n'))
+
+    # Remove images and videos (but keep links!)
     for tag in soup.find_all(['img', 'video', 'source']):
         tag.decompose()
 
     # Process all links
     for link in soup.find_all('a'):
         href = link.get('href', '')
-        link_text = replace_nitter_url_to_twitter_url(link.get_text())
+        # Re-get text after normalization
+        link_text = ' '.join(link.get_text().split())
+        link_text = replace_nitter_url_to_twitter_url(link_text)
 
         if not href:
             continue
@@ -796,52 +814,102 @@ def clean_tweet_description(html_content: str) -> str:
         # Replace nitter URL to twitter URL
         href = replace_nitter_url_to_twitter_url(href)
 
-        # Determine display text
         # Check if domain should keep protocol
         should_keep_protocol = any(domain in href for domain in keep_protocol_domains)
 
-        # Determine display text
-        # Only replace with full URL if the link text contains ellipsis (...)
-        if '…' in link_text or '...' in link_text:
-            display_text = href.replace('https://', '').replace('http://', '')
-        else:
-            # Keep original text (for hashtags, mentions, etc.)
-            display_text = link_text
+        # Check if link text is a URL (starts with http:// or https://)
+        link_text_is_url = link_text.startswith('http://') or link_text.startswith('https://')
+
+        # Check if link text matches href (normalized comparison)
+        link_text_normalized = link_text.replace('http://', '').replace('https://', '').strip()
+        href_normalized = href.replace('http://', '').replace('https://', '').strip()
+        text_matches_href = link_text_normalized == href_normalized
 
         if should_keep_protocol:
             link.replace_with(href)
-        else:
-            # Replace the link with Discord Markdown format
+        elif link_text_is_url and text_matches_href:
+            # Link text is a URL that matches href - use Markdown with protocol removed
+            display_text = link_text.replace('https://', '').replace('http://', '')
             link.replace_with(f'[{display_text}]({href})')
+        elif '…' in link_text or '...' in link_text:
+            # Truncated link - show full URL without protocol
+            display_text = href.replace('https://', '').replace('http://', '')
+            link.replace_with(f'[{display_text}]({href})')
+        else:
+            # Descriptive text - keep as is
+            link.replace_with(f'[{link_text}]({href})')
 
     # Remove all remaining hashtag links (we'll recreate them)
     for link in soup.find_all('a'):
         link_text = link.get_text()
         if link_text.startswith('#'):
-            link.replace_with(link_text)  # Replace with just the text
+            link.replace_with(link_text)
 
     # Get text directly - this preserves all newlines
     text = soup.get_text()
 
-    # Convert standalone hashtags (not already in links) to clickable links
+    # Convert standalone hashtags to clickable links
     import re
     from urllib.parse import quote
 
     def replace_hashtag(match):
-        hashtag_with_hash = match.group(0)  # e.g., #Trickcal or #トリッカル
-        hashtag_without_hash = hashtag_with_hash[1:]  # Remove the #
+        hashtag_with_hash = match.group(0)
+        hashtag_without_hash = hashtag_with_hash[1:]
         # URL encode the hashtag text
         encoded = quote(hashtag_without_hash)
         return f'[{hashtag_with_hash}](https://x.com/hashtag/{encoded})'
 
     # Match hashtags that are NOT already inside Markdown links
-    # Negative lookbehind: (?<!\[) - not preceded by [
-    # Negative lookahead: (?!\]\() - not followed by ](
-    # Match: # followed by word characters (including Unicode)
     hashtag_pattern = r'(?<!\[)#\w+(?!\]\()'
     text = re.sub(hashtag_pattern, replace_hashtag, text)
 
-    # Strip only leading/trailing whitespace, preserve internal newlines
+    # === NOW PROCESS THE QUOTE MARKERS ===
+    # Split by quote markers and add >>> prefix to quoted sections (Discord multi-line quote)
+    if '__QUOTE_START__' in text and '__QUOTE_END__' in text:
+        parts = []
+        segments = text.split('__QUOTE_START__')
+
+        for i, segment in enumerate(segments):
+            if i == 0:
+                # First segment is before any quote
+                if segment.strip():
+                    parts.append(segment.strip())
+            else:
+                # This segment contains a quote
+                if '__QUOTE_END__' in segment:
+                    quote_part, after_quote = segment.split('__QUOTE_END__', 1)
+
+                    # Clean up the quote part
+                    quote_text = quote_part.strip()
+
+                    if quote_text:
+                        # Use Discord's multi-line quote syntax
+                        parts.append(f">>> {quote_text}")
+
+                    # Add the part after the quote
+                    if after_quote.strip():
+                        parts.append(after_quote.strip())
+
+        text = '\n\n'.join(parts)
+
+    # Clean up excessive whitespace
+    lines = text.split('\n')
+    cleaned_lines = []
+    prev_empty = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped:
+            cleaned_lines.append(line)
+            prev_empty = False
+        elif not prev_empty:
+            # Allow one empty line
+            cleaned_lines.append('')
+            prev_empty = True
+
+    text = '\n'.join(cleaned_lines)
+
+    # Strip only leading/trailing whitespace
     return text.strip()
 
 
