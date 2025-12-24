@@ -605,8 +605,9 @@ async def download_video_smart(session: ClientSession, url: str,
 def extract_video_url_from_nitter(nitter_video_url: str) -> str:
     """
     Extract actual Twitter video URL from nitter's /pic/ wrapper.
+    Strips query parameters from the final URL.
 
-    Input: http://nitter.net/pic/video.twimg.com%2Ftweet_video%2Ffile.mp4
+    Input: http://nitter.net/pic/video.twimg.com%2Ftweet_video%2Ffile.mp4?tag=21
     Output: https://video.twimg.com/tweet_video/file.mp4
     """
     # Unquote first
@@ -620,19 +621,20 @@ def extract_video_url_from_nitter(nitter_video_url: str) -> str:
         # Ensure https protocol
         if not actual_url.startswith('http'):
             actual_url = f'https://{actual_url}'
-        return actual_url.replace('http://', 'https://')
+        actual_url = actual_url.replace('http://', 'https://')
+    else:
+        # Fallback: try to clean it manually
+        cleaned = unquoted.replace('http://', 'https://').replace('/pic/', '')
 
-    # Fallback: try to clean it manually
-    cleaned = unquoted.replace('http://', 'https://').replace('/pic/', '')
+        # Remove nitter domains
+        for domain in nitter_url_list:
+            cleaned = cleaned.replace(domain, '')
 
-    # Remove nitter domains
-    for domain in nitter_url_list:
-        cleaned = cleaned.replace(domain, '')
+        # Clean up any double slashes (except after https:)
+        actual_url = re.sub(r'(?<!:)//+', '/', cleaned)
 
-    # Clean up any double slashes (except after https:)
-    cleaned = re.sub(r'(?<!:)//+', '/', cleaned)
-
-    return cleaned
+    # Strip query parameters from the final URL (applies to both paths)
+    return actual_url.split('?')[0]
 
 
 def generate_twitter_embed_name(input_string: str) -> str:
