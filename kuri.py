@@ -32,6 +32,9 @@ from loguru import logger as log
 # noinspection PyUnresolvedReferences
 from lxml import etree
 from mashumaro.mixins.json import DataClassJSONMixin
+from typing_extensions import deprecated
+
+from stoat_webhook import StoatWebhook, StoatMasquerade, StoatEmbed
 
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -185,9 +188,10 @@ class TwitterUser:
     link: str
     icon: str
     key: str
-    webhookUrl: list[str]
+    discordWebhookUrl: list[str]
     discordMention: bool
     discordMentionRoleId: list[str]
+    stoatWebhookUrl: list[str]
 
 
 @dataclass
@@ -224,9 +228,10 @@ class Config:
 @dataclass
 class TwitterWatch:
     twitterHandleName: str
-    webhookUrl: list[str] = field(default_factory=list)
+    discordWebhookUrl: list[str] = field(default_factory=list)
     discordMention: bool = False
     discordMentionRoleId: list[str] = field(default_factory=list)
+    stoatWebhookUrl: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -299,6 +304,135 @@ class WebhookMediaPayload:
     @property
     def total_media_count(self) -> int:
         return self.image_count + self.video_count
+
+
+@dataclass(frozen=True)
+class RandomEmbedColor:
+    """
+    Generates a random colour and provides it in multiple formats useful for:
+    - Discord: .int, .discord_int
+    - Stoat/Revolt: .hex, .string, .hexcode
+    - General use: .rgb_tuple, .rgba_tuple, .css_rgb, .css_rgba
+    """
+
+    r: int
+    g: int
+    b: int
+    a: int = 255  # alpha (default opaque)
+
+    @classmethod
+    def random(cls) -> "RandomEmbedColor":
+        """Factory method to create a random opaque colour."""
+        return cls(
+            r=random.randint(0, 255),
+            g=random.randint(0, 255),
+            b=random.randint(0, 255),
+            a=255
+        )
+
+    @classmethod
+    def random_pastel(cls, saturation: float = 0.5) -> "RandomEmbedColor":
+        """
+        Generate a random pastel colour.
+
+        Args:
+            saturation: How much to blend with white (0.0-1.0).
+                       0.5 = soft pastels (default)
+                       0.3 = very light pastels
+                       0.7 = more vibrant pastels
+        """
+        # Clamp saturation between 0 and 1
+        saturation = max(0.0, min(1.0, saturation))
+
+        # Generate base random color
+        base_r = random.randint(0, 255)
+        base_g = random.randint(0, 255)
+        base_b = random.randint(0, 255)
+
+        # Mix with white (255, 255, 255) to create pastel
+        # Formula: pastel = base * saturation + white * (1 - saturation)
+        r = int(base_r * saturation + 255 * (1 - saturation))
+        g = int(base_g * saturation + 255 * (1 - saturation))
+        b = int(base_b * saturation + 255 * (1 - saturation))
+
+        return cls(r=r, g=g, b=b, a=255)
+
+    @classmethod
+    def random_with_alpha(cls, alpha: int = 255) -> "RandomEmbedColor":
+        """Random colour with custom alpha (0–255)."""
+        return cls.random().__class__(r=cls.random().r, g=cls.random().g, b=cls.random().b, a=alpha)
+
+    @classmethod
+    def random_gradient(cls) -> str:
+        """Generate a simple random linear gradient for Stoat."""
+        c1 = cls.random().hex
+        c2 = cls.random().hex
+        # direction = random.choice([
+        #     "to right", "to bottom", "135deg", "45deg",
+        #     "to bottom right", "to top left"
+        # ])
+        return f"linear-gradient(to right, {c1}, {c2})"
+
+    @classmethod
+    def random_pastel_gradient(cls, saturation: float = 0.5) -> str:
+        """Generate a pastel gradient for Stoat."""
+        c1 = cls.random_pastel(saturation).hex
+        c2 = cls.random_pastel(saturation).hex
+        return f"linear-gradient(to right, {c1}, {c2})"
+
+    @property
+    def int(self) -> int:
+        """Discord-style integer (0xRRGGBB)."""
+        return (self.r << 16) | (self.g << 8) | self.b
+
+    @property
+    def discord_int(self) -> int:
+        """Same as .int — explicit alias for Discord."""
+        return self.int
+
+    @property
+    def hex(self) -> str:
+        """Stoat-compatible hex string with # prefix (e.g. "#1da1f2")."""
+        return f"#{self.r:02x}{self.g:02x}{self.b:02x}"
+
+    @property
+    def hexcode(self) -> str:
+        """Alias for .hex — no # prefix (e.g. "1da1f2")."""
+        return f"{self.r:02x}{self.g:02x}{self.b:02x}"
+
+    @property
+    def string(self) -> str:
+        """Stoat-compatible string — returns .hex by default."""
+        return self.hex
+
+    @property
+    def rgb_tuple(self) -> tuple[int, int, int]:
+        """(r, g, b) tuple."""
+        return (self.r, self.g, self.b)
+
+    @property
+    def rgba_tuple(self) -> tuple[int, int, int, int]:
+        """(r, g, b, a) tuple."""
+        return (self.r, self.g, self.b, self.a)
+
+    @property
+    def css_rgb(self) -> str:
+        """CSS rgb() format — "rgb(29,161,242)"."""
+        return f"rgb({self.r},{self.g},{self.b})"
+
+    @property
+    def css_rgba(self) -> str:
+        """CSS rgba() format — "rgba(29,161,242,1)"."""
+        alpha = self.a / 255.0
+        return f"rgba({self.r},{self.g},{self.b},{alpha:.2f})".rstrip("0").rstrip(".")
+
+    def __str__(self) -> str:
+        """Default string representation — hex with #."""
+        return self.hex
+
+    def __int__(self) -> int:
+        """Casting to int gives Discord integer."""
+        return self.int
 
 
 # Check if config file exist, if not abort
@@ -489,12 +623,14 @@ def convert_bytes_to_mb(input_mb: int) -> float:
     return input_mb / 1024 / 1024
 
 
-def truncate_text(text:str, tweet_link:str, limit=__discord_maximum_embed_character):
+def truncate_text(text: str, tweet_link: str, limit=__discord_maximum_embed_character):
     """
     Truncate text to fit Discord webhook message limits.
     For Twitter posts that exceed Discord's character limit.
     Truncates at the last paragraph or line break before the limit,
     so it never cuts in the middle of a sentence/paragraph.
+
+    Removing those emoji checker, because it became complicated to check paragraph boundary
 
     Args:
         text (str): The text to truncate
@@ -511,25 +647,44 @@ def truncate_text(text:str, tweet_link:str, limit=__discord_maximum_embed_charac
 
     available = limit - len(footer)
 
-    # Regex: lines that start with emoji (including regional indicators, stars, hearts, etc.)
-    # or common bullets used in these tweets
-    # Matches any line that starts with emoji(s) or common bullets
-    # This covers ⭐ ❤️ 🧡 ◆ ▶ ★ ☆ ✨ ❗ ➡️ and literally any future emoji
-    section_start = re.compile(r'^[\u2600-\u26FF\u2700-\u27BF\U0001F300-\U0001F9FF\uFE0F]+', re.MULTILINE)
+    # Find all paragraph break positions (both regular and blockquote)
+    # Regular paragraph: \n\n
+    # Blockquote paragraph: \n> \n (empty blockquote line)
+    paragraph_breaks = []
 
-    # Find all positions where a new big section starts
-    positions = [m.start() for m in section_start.finditer(text)]
+    # Find regular paragraph breaks
+    pos = 0
+    while True:
+        pos = text.find('\n\n', pos)
+        if pos == -1:
+            break
+        paragraph_breaks.append(pos)
+        pos += 2
 
-    if positions:
-        # From the end: take the last section we can fully include
-        for pos in reversed(positions):
-            if pos <= available:
-                return text[:pos].rstrip() + footer
+    # Find blockquote paragraph breaks (> \n> pattern or > \n>)
+    pos = 0
+    while True:
+        pos = text.find('\n> \n', pos)
+        if pos == -1:
+            break
+        paragraph_breaks.append(pos + 1)  # Position after first \n, before > \n
+        pos += 3
 
-    # === Fallback: paragraph / line break (same as before) ===
-    cutoff = text.rfind('\n\n', 0, available)
+    # Sort all break positions
+    paragraph_breaks.sort()
+
+    # Find the last paragraph break that fits
+    cutoff = -1
+    for pos in reversed(paragraph_breaks):
+        if pos <= available:
+            cutoff = pos
+            break
+
+    # Fallback to single newline
     if cutoff == -1:
         cutoff = text.rfind('\n', 0, available)
+
+    # Last resort: hard cut
     if cutoff == -1:
         cutoff = available
 
@@ -667,18 +822,20 @@ def normalize_datetime_to_utc_naive(dt: datetime) -> datetime:
         return dt
 
 
-def generate_twitter_user_from_rss(feed_data: FeedParserDict, key: str, webhook_url: list[str],
+def generate_twitter_user_from_rss(feed_data: FeedParserDict, key: str, discord_webhook_url: list[str],
                                    discord_mention: bool,
-                                   discord_mention_role_id: list[str]) -> TwitterUser:
+                                   discord_mention_role_id: list[str],
+                                   stoat_webhook_url: list[str], ) -> TwitterUser:
     """Create TwitterUser object from RSS feed data"""
     return TwitterUser(
         name=generate_twitter_embed_name(feed_data.feed.title),
         link=replace_url_to_twitter(feed_data.feed.link, __twitter_url),
         icon=generate_twitter_profile_picture_link(feed_data.feed.image.href),
         key=key,
-        webhookUrl=webhook_url,
+        discordWebhookUrl=discord_webhook_url,
         discordMention=discord_mention,
-        discordMentionRoleId=discord_mention_role_id
+        discordMentionRoleId=discord_mention_role_id,
+        stoatWebhookUrl=stoat_webhook_url
     )
 
 
@@ -713,8 +870,6 @@ def generate_media_filename(url: str, index: int = 0) -> str:
     if index > 0:
         return f"twitter_media_{url_hash}_{index}.{ext}"
     return f"twitter_media_{url_hash}.{ext}"
-
-
 
 
 def extract_media_from_description(description: str, twitter_card_template: str) -> tuple[List[TwitterMedia], bool]:
@@ -772,7 +927,8 @@ def clean_tweet_description(html_content: str) -> str:
     4. Showing full URLs without protocol ONLY for truncated links (containing ...)
     5. Keeping hashtag and mention links with their original text
     6. Keeping protocol for specific domains in the exclusion list
-    7. Converting blockquotes to Discord multi-line quote format (>>> prefix)
+    7.a. Converting blockquotes to Discord multi-line quote format (>>> prefix) < this not work
+    7.b. Converting blockquotes to Discord multi-single-line quote format (>{space}) < this work
     """
     soup = BeautifulSoup(html_content, 'lxml')
 
@@ -866,7 +1022,7 @@ def clean_tweet_description(html_content: str) -> str:
     text = re.sub(hashtag_pattern, replace_hashtag, text)
 
     # === NOW PROCESS THE QUOTE MARKERS ===
-    # Split by quote markers and add >>> prefix to quoted sections (Discord multi-line quote)
+    # Split by quote markers and add > prefix to each line of quoted sections (Discord single-line quote)
     if '__QUOTE_START__' in text and '__QUOTE_END__' in text:
         parts = []
         segments = text.split('__QUOTE_START__')
@@ -885,8 +1041,9 @@ def clean_tweet_description(html_content: str) -> str:
                     quote_text = quote_part.strip()
 
                     if quote_text:
-                        # Use Discord's multi-line quote syntax
-                        parts.append(f">>> {quote_text}")
+                        # Add "> " prefix to each line instead of ">>> "
+                        quoted_lines = [f"> {line}" for line in quote_text.split('\n')]
+                        parts.append('\n'.join(quoted_lines))
 
                     # Add the part after the quote
                     if after_quote.strip():
@@ -915,15 +1072,16 @@ def clean_tweet_description(html_content: str) -> str:
     return text.strip()
 
 
+@deprecated("Use RandomEmbedColor")
 def generate_embed_color() -> int:
     # Generate a random integer between 0 and 0xFFFFFF
     random_color = random.randint(0, 0xFFFFFF)
     return random_color
 
 
-def generate_embed_data(title: str, payload: WebhookMediaPayload,
-                        timestamp: float, author_name: str = None, author_url: str = None,
-                        author_icon_url: str = None) -> DiscordEmbed:
+def generate_discord_embed_data(title: str, payload: WebhookMediaPayload,
+                                timestamp: float, author_name: str = None, author_url: str = None,
+                                author_icon_url: str = None) -> DiscordEmbed:
     """Create embed object for webhook."""
     embed = DiscordEmbed()
 
@@ -932,7 +1090,7 @@ def generate_embed_data(title: str, payload: WebhookMediaPayload,
                          url=author_url,
                          icon_url=author_icon_url)
 
-    embed.set_color(generate_embed_color())
+    embed.set_color(RandomEmbedColor.random().discord_int)
 
     if timestamp:
         embed.set_timestamp(timestamp)
@@ -948,6 +1106,27 @@ def generate_embed_data(title: str, payload: WebhookMediaPayload,
         footer += __footer_append_template.format(f"{payload.video_count}{__emoji_video}")
 
     embed.set_footer(text=footer, icon_url=main_config.config.embedFooterImageUrl)
+
+    return embed
+
+
+def generate_stoat_embed_data(title: str, payload: WebhookMediaPayload,
+                              timestamp: float, author_name: str = None, author_url: str = None,
+                              author_icon_url: str = None) -> StoatEmbed:
+    """Create embed object for webhook."""
+    embed = StoatEmbed()
+
+    if author_name and author_url:
+        embed.url = author_url
+        embed.title = author_name
+
+    embed.colour = RandomEmbedColor.random().hex
+
+    if title:
+        embed.description = clean_tweet_text(title)
+
+    if author_icon_url:
+        embed.icon_url = author_icon_url
 
     return embed
 
@@ -1195,7 +1374,7 @@ async def generate_media_webhook(
     return payload
 
 
-async def post_to_single_webhook(
+async def post_to_single_discord_webhook(
         session: ClientSession,
         webhook_url: str,
         content: str,
@@ -1205,7 +1384,7 @@ async def post_to_single_webhook(
         twitter_user: TwitterUser
 ) -> bool:
     """
-    OPTIMIZED: Post to a single webhook (videos + embed).
+    OPTIMIZED: Post to a single webhook Discord (videos + embed).
     Extracted for parallel execution across multiple webhooks.
     """
     try:
@@ -1259,7 +1438,7 @@ async def post_to_single_webhook(
             if payload.images:
                 for idx, media in enumerate(payload.images):
                     is_first = idx == 0
-                    embed = generate_embed_data(
+                    embed = generate_discord_embed_data(
                         title=payload.cleaned_description if is_first else "",
                         payload=payload,
                         timestamp=timestamp if is_first else None,
@@ -1272,7 +1451,7 @@ async def post_to_single_webhook(
                     webhook.add_embed(embed)
             else:
                 # No images, just text embed
-                embed = generate_embed_data(
+                embed = generate_discord_embed_data(
                     title=payload.cleaned_description,
                     payload=payload,
                     timestamp=timestamp,
@@ -1308,6 +1487,78 @@ async def post_to_single_webhook(
         return False
 
 
+async def post_to_single_stoat_webhook(
+        session: ClientSession,
+        webhook_url: str,
+        content: str,
+        tweet_link: str,
+        payload: WebhookMediaPayload,
+        timestamp: float,
+        twitter_user: TwitterUser
+) -> bool:
+    """
+    OPTIMIZED: Post to a single webhook for Stoat (videos + embed).
+    Extracted for parallel execution across multiple webhooks.
+    """
+    try:
+        log.info(f"Processing webhook: {webhook_url[:50]}...")
+
+        # Create webhook instance (no content here)
+        webhook = StoatWebhook(
+            webhook_url=webhook_url,
+            session=session,
+            rate_limit_retry=True
+        )
+
+        # Common setup
+        masquerade = StoatMasquerade(
+            name=twitter_user.name,
+            avatar=twitter_user.icon,
+            colour=RandomEmbedColor.random_pastel_gradient()
+        )
+        webhook.set_masquerade(masquerade)
+
+        if main_config.config.generateEmbed:
+            log.info("Sending with embed (generateEmbed=True)")
+
+            # Build embed
+            embed = generate_stoat_embed_data(
+                title=payload.cleaned_description,
+                payload=payload,
+                timestamp=timestamp,
+                author_name=twitter_user.name,
+                author_url=twitter_user.link,
+                author_icon_url=twitter_user.icon
+            )
+            webhook.add_embed(embed)
+
+            webhook.set_content(content)
+
+        else:
+            log.info("Sending without embed (generateEmbed=False)")
+            # Just content (tweet link or whatever)
+            webhook.set_content(content)
+
+        # Execute
+        response = await webhook.execute(
+            remove_embeds=True,
+            remove_attachments=True,
+            clear_state=True
+        )
+
+        if response.ok:
+            log.info(f"✅ Posted successfully (HTTP {response.status})")
+            return True
+        else:
+            text = await response.text()
+            log.error(f"❌ Failed to post. HTTP {response.status} - {text}")
+            return False
+
+    except Exception as e:
+        log.error(f"❌ Error sending to webhook {webhook_url[:50]}...: {e}")
+        return False
+
+
 async def send_to_discord_with_media(session: ClientSession,
                                      tweet_link: str,
                                      embed_title: str,
@@ -1335,27 +1586,79 @@ async def send_to_discord_with_media(session: ClientSession,
     )
 
     # OPTIMIZED: Post to all webhooks in parallel
-    if len(twitter_user.webhookUrl) > 1:
-        log.info(f"🚀 Posting to {len(twitter_user.webhookUrl)} webhooks in parallel...")
+    if len(twitter_user.discordWebhookUrl) > 1:
+        log.info(f"🚀 Posting to {len(twitter_user.discordWebhookUrl)} webhooks in parallel...")
         webhook_tasks = [
-            post_to_single_webhook(
+            post_to_single_discord_webhook(
                 session, webhook_url, content, tweet_link,
                 payload, timestamp, twitter_user
             )
-            for webhook_url in twitter_user.webhookUrl
+            for webhook_url in twitter_user.discordWebhookUrl
         ]
 
         results = await asyncio.gather(*webhook_tasks, return_exceptions=True)
 
         # Check if all succeeded
         success_count = sum(1 for r in results if r is True)
-        log.info(f"✅ Posted to {success_count}/{len(twitter_user.webhookUrl)} webhooks successfully")
+        log.info(f"✅ Posted to {success_count}/{len(twitter_user.discordWebhookUrl)} webhooks successfully")
 
         return success_count > 0  # Return True if at least one webhook succeeded
     else:
         # Single webhook, post directly
-        return await post_to_single_webhook(
-            session, twitter_user.webhookUrl[0], content, tweet_link,
+        return await post_to_single_discord_webhook(
+            session, twitter_user.discordWebhookUrl[0], content, tweet_link,
+            payload, timestamp, twitter_user
+        )
+
+
+async def send_to_stoat_with_media(session: ClientSession,
+                                   tweet_link: str,
+                                   embed_title: str,
+                                   tweet_media_list: List[TwitterMedia],
+                                   tweet_has_video: bool,
+                                   timestamp: float,
+                                   twitter_user: TwitterUser
+                                   ) -> bool:
+    content = tweet_link
+    if main_config.config.useFxTwitterLinkInDiscord:
+        content = content.replace(__twitter_url, __fxtwitter_url)
+
+    # Havent Research Yet
+    # if twitter_user.discordMention and twitter_user.discordMentionRoleId:
+    #     mentions = ' '.join([f'<@&{role_id}>' for role_id in twitter_user.discordMentionRoleId])
+    #     content = f'{content}\n{mentions}'
+
+    # Generate payload once (shared across all webhooks)
+    payload = await generate_media_webhook(
+        session, tweet_link, embed_title, tweet_media_list,
+        tweet_has_video, twitter_user
+    )
+
+    # Alter somewhat japanese text got payload too big
+    payload.cleaned_description = truncate_text(clean_tweet_description(embed_title), tweet_link, 1000)
+
+    # OPTIMIZED: Post to all webhooks in parallel
+    if len(twitter_user.stoatWebhookUrl) > 1:
+        log.info(f"🚀 Posting to {len(twitter_user.stoatWebhookUrl)} webhooks in parallel...")
+        webhook_tasks = [
+            post_to_single_stoat_webhook(
+                session, webhook_url, content, tweet_link,
+                payload, timestamp, twitter_user
+            )
+            for webhook_url in twitter_user.stoatWebhookUrl
+        ]
+
+        results = await asyncio.gather(*webhook_tasks, return_exceptions=True)
+
+        # Check if all succeeded
+        success_count = sum(1 for r in results if r is True)
+        log.info(f"✅ Posted to {success_count}/{len(twitter_user.stoatWebhookUrl)} webhooks successfully")
+
+        return success_count > 0  # Return True if at least one webhook succeeded
+    else:
+        # Single webhook, post directly
+        return await post_to_single_stoat_webhook(
+            session, twitter_user.stoatWebhookUrl[0], content, tweet_link,
             payload, timestamp, twitter_user
         )
 
@@ -1429,9 +1732,10 @@ async def main():
                         generate_twitter_user_from_rss(
                             feed_data=feedParse,
                             key=handler_name,
-                            webhook_url=item.webhookUrl,
+                            discord_webhook_url=item.discordWebhookUrl,
                             discord_mention=item.discordMention,
-                            discord_mention_role_id=item.discordMentionRoleId
+                            discord_mention_role_id=item.discordMentionRoleId,
+                            stoat_webhook_url=item.stoatWebhookUrl
                         )
                     )
                 else:
@@ -1441,9 +1745,10 @@ async def main():
                             link=f"{__twitter_url}/{handler_name}",
                             icon="",
                             key=handler_name,
-                            webhookUrl=item.webhookUrl,
+                            discordWebhookUrl=item.discordWebhookUrl,
                             discordMention=item.discordMention,
-                            discordMentionRoleId=item.discordMentionRoleId
+                            discordMentionRoleId=item.discordMentionRoleId,
+                            stoatWebhookUrl=item.stoatWebhookUrl
                         )
                     )
 
@@ -1482,7 +1787,7 @@ async def main():
             entry_data = sorted(entry_data, key=attrgetter('pubdate'))
             log.info(f"Found {len(entry_data)} new entries to post")
 
-            # Post to Discord
+            # Post count
             posted_count = 0
             # CHANGED: Track latest post per handler
             latest_by_handler: dict[str, datetime] = {}
@@ -1497,15 +1802,26 @@ async def main():
 
                 try:
                     log.info(f"Posting tweet from {data.key} at {data.pubdate}: {data.link}")
-                    success = await send_to_discord_with_media(
-                        session=session,
-                        tweet_link=data.link,
-                        embed_title=data.description,
-                        tweet_media_list=data.mediaList,
-                        tweet_has_video=data.hasVideo,
-                        timestamp=data.timestamp,
-                        twitter_user=twitter_user
-                    )
+                    if twitter_user.discordWebhookUrl:
+                        success = await send_to_discord_with_media(
+                            session=session,
+                            tweet_link=data.link,
+                            embed_title=data.description,
+                            tweet_media_list=data.mediaList,
+                            tweet_has_video=data.hasVideo,
+                            timestamp=data.timestamp,
+                            twitter_user=twitter_user
+                        )
+                    if twitter_user.stoatWebhookUrl:
+                        success = await send_to_stoat_with_media(
+                            session=session,
+                            tweet_link=data.link,
+                            embed_title=data.description,
+                            tweet_media_list=data.mediaList,
+                            tweet_has_video=data.hasVideo,
+                            timestamp=data.timestamp,
+                            twitter_user=twitter_user
+                        )
 
                     if success:
                         posted_count += 1
@@ -1520,7 +1836,7 @@ async def main():
                     log.error(f"Error posting to Discord: {post_error}")
                     continue
 
-            log.info(f"⏱️ Discord posting took: {time.time() - post_start:.2f}s")
+            log.info(f"⏱️ Webhook posting took: {time.time() - post_start:.2f}s")
             log.info(f"Successfully posted {posted_count}/{len(entry_data)} tweets")
 
             # CHANGED: Update per-handler checkpoints
