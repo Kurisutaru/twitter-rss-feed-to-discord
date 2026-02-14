@@ -1510,13 +1510,13 @@ async def post_to_single_stoat_webhook(
             rate_limit_retry=True
         )
 
-        # Common setup
-        masquerade = StoatMasquerade(
-            name=twitter_user.name,
-            avatar=twitter_user.icon,
-            colour=RandomEmbedColor.random_pastel_gradient()
-        )
-        webhook.set_masquerade(masquerade)
+        # forgot to remove, just code try the feature
+        # masquerade = StoatMasquerade(
+        #     name=twitter_user.name,
+        #     avatar=twitter_user.icon,
+        #     colour=RandomEmbedColor.random_pastel_gradient()
+        # )
+        # webhook.set_masquerade(masquerade)
 
         if main_config.config.generateEmbed:
             log.info("Sending with embed (generateEmbed=True)")
