@@ -1635,7 +1635,7 @@ async def send_to_stoat_with_media(session: ClientSession,
     )
 
     # Alter somewhat japanese text got payload too big
-    payload.cleaned_description = truncate_text(clean_tweet_description(embed_title), tweet_link, 1000)
+    payload.cleaned_description = truncate_text(clean_tweet_description(embed_title), tweet_link, 700)
 
     # OPTIMIZED: Post to all webhooks in parallel
     if len(twitter_user.stoatWebhookUrl) > 1:
