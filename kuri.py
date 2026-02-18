@@ -1503,6 +1503,100 @@ async def post_to_single_stoat_webhook(
     try:
         log.info(f"Processing webhook: {webhook_url[:50]}...")
 
+        # === STEP 1: Send videos first ===
+        if payload.videos:
+            log.info(f"📹 Sending {len(payload.videos)} video(s)...")
+            for video in payload.videos:
+                video_webhook = StoatWebhook(
+                    webhook_url=webhook_url,
+                    session=session,
+                    rate_limit_retry=True
+                )
+
+                # Stoat only send URL
+                log.info(f"Sending video URL: {video.original_url}")
+                video_webhook.content = __video_embed_content.format(video.original_url)
+
+                video_response = await video_webhook.execute()
+
+                if video_response.ok:
+                    log.info(f"✅ Video posted: {video.filename}")
+                else:
+                    log.error(f"❌ Failed to post video. HTTP {video_response.status}")
+                    return False
+
+        # === STEP 2: Send content with or without embed ===
+        if main_config.config.generateEmbed:
+            # Send with embed (original behavior)
+            log.info("Sending with embed (generateEmbed=True)")
+            webhook = StoatWebhook(
+                webhook_url=webhook_url,
+                session=session,
+                rate_limit_retry=True
+            )
+
+            # Attach author icon
+            # if payload.author_icon_data:
+            #     webhook.add_file(file=payload.author_icon_data, filename=payload.author_icon_filename)
+            #     author_icon_url = f"attachment://{payload.author_icon_filename}"
+            # else:
+            #     author_icon_url = twitter_user.icon
+
+            # forgot to remove, just code try the feature
+            # masquerade = StoatMasquerade(
+            #     name=twitter_user.name,
+            #     avatar=twitter_user.icon,
+            #     colour=RandomEmbedColor.random_pastel_gradient()
+            # )
+            # webhook.set_masquerade(masquerade)
+
+            # Better masking image/video link into content ?
+            # So Stoat can fetch itself ?
+            # Because it's too tedious to upload then add image/video to embed
+            # TODO: Better Image / Video Embed Implementation on Stoat Side
+            # Attach all images
+            embed = generate_stoat_embed_data(
+                title=payload.cleaned_description,
+                payload=payload,
+                timestamp=timestamp,
+                author_name=twitter_user.name,
+                author_url=twitter_user.link,
+                author_icon_url=twitter_user.icon
+            )
+            webhook.add_embed(embed)
+
+            # Add Image into Content
+            if payload.images:
+                for idx, media in enumerate(payload.images):
+                    is_first = idx == 0
+                    content = f'{content} [{__braille_pattern_blank}]({media.original_url})'
+
+            webhook.set_content(content)
+            response = await webhook.execute()
+            if response.ok:
+                log.info(f"✅ Embed posted successfully")
+                return True
+            else:
+                log.error(f"❌ Failed to post embed. HTTP {response.status} + {response.reason}")
+                return False
+        else:
+            # Send just content without embed (simple mode)
+            log.info("Sending without embed (generateEmbed=False)")
+            webhook = StoatWebhook(webhook_url=webhook_url, rate_limit_retry=True)
+            webhook.set_content(content)
+
+            response = await webhook.execute()
+            if response.ok:
+                log.info(f"✅ Content posted successfully")
+                return True
+            else:
+                log.error(f"❌ Failed to post content. HTTP {response.status_code}")
+                return False
+
+    except Exception as webhook_error:
+        log.error(f"❌ Error sending to webhook: {webhook_error}")
+        return False
+
         # Create webhook instance (no content here)
         webhook = StoatWebhook(
             webhook_url=webhook_url,
