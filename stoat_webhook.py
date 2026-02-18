@@ -1,11 +1,11 @@
 import json
 import re
-from dataclasses import asdict
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 
 import aiohttp
 from loguru import logger
+
 
 @dataclass
 class StoatEmbed:
@@ -147,18 +147,18 @@ class StoatWebhook:
     """Async webhook client with discord-webhook-like interface"""
 
     def __init__(
-        self,
-        webhook_url: str,
-        *,
-        rate_limit_retry: bool = True,
-        session: Optional[aiohttp.ClientSession] = None
+            self,
+            webhook_url: str,
+            *,
+            rate_limit_retry: bool = True,
+            session: Optional[aiohttp.ClientSession] = None
     ):
         self.webhook_url = webhook_url.rstrip("/")
         match = re.match(r".*/webhooks/([^/]+)/(.+?)(?:/|$)", self.webhook_url)
         if not match:
             raise ValueError("Invalid Stoat webhook URL format")
-        self.id = match.group(1)          # webhook id
-        self.token = match.group(2)       # webhook token
+        self.id = match.group(1)  # webhook id
+        self.token = match.group(2)  # webhook token
 
         self._session = session or aiohttp.ClientSession()
         self.rate_limit_retry = rate_limit_retry
@@ -167,9 +167,17 @@ class StoatWebhook:
         self.embeds: List[StoatEmbed] = []
         self.content: Optional[str] = None
         self.masquerade: Optional[StoatMasquerade] = None
-        self.attachments: List[str] = []          # file IDs
+        self.attachments: List[str] = []  # file IDs
         self.last_response: Optional[aiohttp.ClientResponse] = None
         self.last_message_id: Optional[str] = None
+
+        self.max_length = 2000
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        await self.close()
 
     async def close(self):
         if self._session and not self._session.closed:
@@ -196,14 +204,28 @@ class StoatWebhook:
     def add_masquerade(self, masquerade: StoatMasquerade) -> None:
         self.masquerade = masquerade
 
+    def byte_len(self, s: str) -> int:
+        return len(s.encode("utf-8"))
+
+    def truncate_to_bytes(self, s: str, max_bytes: int, suffix: str = "...") -> str:
+        suffix_bytes = len(suffix.encode("utf-8"))
+        limit = max_bytes - suffix_bytes
+        encoded = s.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return s
+        # Truncate to limit bytes, then decode safely ignoring partial chars
+        return encoded[:limit].decode("utf-8", errors="ignore") + suffix
+
     def _build_payload(self) -> Dict:
 
         payload: Dict[str, Any] = {}
+        available_max_length = self.max_length
 
         if self.content is not None:
-            if len(self.content) > 2000:
-                self.content = self.content[:1997] + "..."
+            content = self.content
+            self.content = self.truncate_to_bytes(content, available_max_length)
             payload["content"] = self.content
+            available_max_length -= self.byte_len(content)
 
         if self.masquerade:
             masquerade_dict = {}
@@ -242,9 +264,9 @@ class StoatWebhook:
                     embed_dict["title"] = embed.title
 
                 # description: max 2000 ? doubt
-                if len(embed.description) > 2000:
-                   embed.description = embed.description[:1997] + "..."
                 if embed.description:
+                    embed.description = self.truncate_to_bytes(embed.description, available_max_length)
+                    available_max_length -= self.byte_len(embed.description)
                     embed_dict["description"] = embed.description
 
                 # url: max 256
@@ -284,10 +306,10 @@ class StoatWebhook:
         return payload
 
     async def execute(
-        self,
-        remove_embeds: bool = False,
-        remove_attachments: bool = False,
-        clear_state: bool = False
+            self,
+            remove_embeds: bool = False,
+            remove_attachments: bool = False,
+            clear_state: bool = False
     ) -> aiohttp.ClientResponse:
         """
         Execute the webhook with the current state (content, embeds, masquerade, attachments).
@@ -307,10 +329,10 @@ class StoatWebhook:
         payload = self._build_payload()
 
         async with self._session.post(
-            self.webhook_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            raise_for_status=False
+                self.webhook_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                raise_for_status=False
         ) as response:
             self.last_response = response
 

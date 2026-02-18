@@ -948,7 +948,7 @@ def clean_tweet_description(html_content: str) -> str:
     blockquotes = soup.find_all('blockquote')
     for blockquote in blockquotes:
         # Mark blockquote with a special marker that survives text extraction
-        blockquote.insert(0, soup.new_string('\n__QUOTE_START__\n'))
+        blockquote.insert(0, soup.new_string('\n__QUOTE_START__\n\n'))
         blockquote.append(soup.new_string('\n__QUOTE_END__\n'))
 
     # Remove images and videos (but keep links!)
@@ -1550,11 +1550,6 @@ async def post_to_single_stoat_webhook(
             # )
             # webhook.set_masquerade(masquerade)
 
-            # Better masking image/video link into content ?
-            # So Stoat can fetch itself ?
-            # Because it's too tedious to upload then add image/video to embed
-            # TODO: Better Image / Video Embed Implementation on Stoat Side
-            # Attach all images
             embed = generate_stoat_embed_data(
                 title=payload.cleaned_description,
                 payload=payload,
@@ -1727,9 +1722,6 @@ async def send_to_stoat_with_media(session: ClientSession,
         session, tweet_link, embed_title, tweet_media_list,
         tweet_has_video, twitter_user
     )
-
-    # Alter somewhat japanese text got payload too big
-    payload.cleaned_description = truncate_text(clean_tweet_description(embed_title), tweet_link, 700)
 
     # OPTIMIZED: Post to all webhooks in parallel
     if len(twitter_user.stoatWebhookUrl) > 1:
