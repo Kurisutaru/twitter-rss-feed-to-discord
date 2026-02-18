@@ -1,0 +1,15 @@
+[project]
+name = "twitter-rss-feed-to-discord"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.13.1",
+    "beautifulsoup4>=4.14.2",
+    "discord-webhook>=1.4.1",
+    "feedparser>=6.0.12",
+    "loguru>=0.7.3",
+    "lxml>=6.0.2",
+    "mashumaro[orjson]>=3.17",
+    "python-dateutil>=2.9.0.post0",
+]

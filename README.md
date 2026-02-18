@@ -1,8 +1,33 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-# Twitter RSS Feed to Discord
+# ~~Twitter~~ Nitter RSS Feed to Discord
 
-This project enables the pooling of data from a Twitter RSS feed sourced from a public Nitter Instance and forwards it to a Discord Webhook Embed. By utilizing this system, you can keep your Discord community updated with the latest tweets from a specific Twitter account without directly interacting with the platform.
+This project enables the pooling of data from a Nitter RSS feed sourced from a public (or private) Nitter Instance and forwards it to a Discord Webhook Embed. By utilizing this system, you can keep your Discord community updated with the latest tweets from a specific Twitter account without directly interacting with the platform.
+
+## Changelogs
+
+- [Added] **RSS Video Fallback System**: When Nitter RSS includes a video thumbnail but **no video URL**, the script now pulls the video from **fxtwitter.com** to ensure full embed support in Discord. Includes detailed flowchart.
+- [Added] Config switch to not generate my own embed implementation, also replacing the posted link with something else (like fxtwitter.com), or keep it blank if you don't want to change. .
+- Config switch to not generate my own embed implementation, also replacing the posted link with something else (like fxtwitter.com), or keep it blank if you don't want to change.
+- Now supports multiple webhooks and multiple user mentions.
+- Revamped core code (mostly taken from my other project).
+
+## RSS Video Check Flowchart
+![Nitter RSS Video Fetch fxtwitter](assets/image/nitter_rss_video_fetch_fxtwitter.png)
+
+The script pulls tweets via Nitter's RSS feed. However, **Nitter sometimes includes a video thumbnail but no video URL** in the RSS — even though the video plays fine on the Nitter web interface.
+
+To fix this, the script checks:
+- **Thumbnail + Video** → Use Nitter source directly
+- **Thumbnail only (no Video)** → Pull video metadata from **fxtwitter.com**
+
+This ensures videos are always included in Discord embeds, even when Nitter's RSS is incomplete.
+
+![TweetShift Embed Method](assets/image/tweetshift_embed_method.png)
+
+I use the **TweetShift** method to embed the video URL first (followed by the tweet), since `set_video()` are not supported in Discord webhooks.
+
+I *would* prefer uploading videos directly to Discord for long-term preservation (like images), but file size limits and lack of webhook support make it impractical. The **TweetShift + fxtwitter fallback** remains the most reliable solution.
 
 ## Table of Contents
 
@@ -12,7 +37,7 @@ This project enables the pooling of data from a Twitter RSS feed sourced from a 
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [Contributing](#contributing)
-- [License](#license)
+- [License](LICENSE)
 
 ## Introduction
 
@@ -24,52 +49,38 @@ The integration with Discord Webhook Embeds ensures that tweets are presented in
 
 Before setting up this project, you need to have the following prerequisites:
 
-- Python (version 3.7 or higher)
-- SQLite 3
+- Python (version 3.11 or higher)
 - Discord account and access to a Discord server with the "Manage Webhooks" permission
 - Twitter account (for the target user timeline you want to track)
 - Nitter Instance URL (public instance or self-hosted)
-- Internet connectivity to fetch data from Twitter RSS feeds and post to Discord Webhook
+- Internet connectivity to fetch data from Nitter RSS feeds and post to a Discord webhook
 
 ## Installation
 
 To get started, follow these steps:
 
 1. Clone this repository to your local machine.
-2. Install the required Python dependencies by running `pip install -r requirements.txt`.
+2. Install the required Python dependencies by running:
+
+```bash
+uv sync
+``` 
+
+or
+
+```bash
+pip install -r requirements.txt
+``` 
 
 ## Configuration
 
 Before running the script, you need to configure some settings:
 
 1. Open `kuri.config.json` in your preferred text editor.
-2. Set the Nitter Instance URL in the `nitterServer` variable. Ensure that the Nitter server serves RSS Feeds.
-3. Enter the respective Twitter on URL in the `twitterWatch` variable.
-4. Specify the Twitter handle of the user whose timeline you want to track in the `twitterHandleName` variable..
+2. Set the Nitter instance URL in the `nitterServer` variable. Ensure that the Nitter server serves RSS feeds.
+3. Enter the respective Twitter account URL in the `twitterWatch` variable.
+4. Specify the Twitter handle of the user whose timeline you want to track in the `twitterHandleName` variable.
 5. Adjust any other optional settings to customize the behavior of the script.
-
-```
-{
-  "config": {
-    "footerTextForEmbed": "Enter any text you want to display at the bottom-left of the embed.",
-    "footerImageUrlForEmbed": "Provide the URL of any image you want to include at the bottom-left of the embed."
-  },
-  "nitterServer": [
-    "https://nitter.net",
-  ],
-  "twitterWatch": [
-    {
-      "twitterHandleName": "{Twitter Handle Name without @, e.g., @Varenchinusu becomes Varenchinusu}",
-      "twitterDbCode": "Enter a unique code for DB identifier.",
-      "webhookUrl": "https://{Discord Webhook URL}",
-      "discordNotify": true,
-      "discordNotifyRoleId": "1234567890"
-    }
-  ]
-}
-```
-
-
 
 ## Usage
 
@@ -78,6 +89,13 @@ Once you have completed the installation and configuration, you can run the scri
 ```bash
 python kuri.py
 ```
+
+or
+
+```bash
+uv run kuri.py
+```
+
 The script will start fetching tweets from the specified Twitter user's timeline RSS feed through the Nitter Instance and post them to the configured Discord Webhook. Each tweet will be displayed as an attractive Embed, providing essential information like the tweet content, date, and user details.
 
 It is recommended to automate the script execution using tools like cron (Linux) or Task Scheduler (Windows) to keep the Discord channel updated regularly.
@@ -95,16 +113,4 @@ We welcome and appreciate contributions to this project! If you want to contribu
 
 By contributing to this project, you agree to license your contributions under the same [MIT License](LICENSE) as the rest of the project.
 
-We appreciate your efforts and will review your contributions as soon as possible. Thank you for making this project better!
-
-## License
-
-The MIT License (MIT)
-
-Copyright (c) 2023 Kurisutaru, Kurisutaru.net
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+I appreciate your efforts and will review your contributions as soon as possible. Thank you for making this project better!
