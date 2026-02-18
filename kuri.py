@@ -19,6 +19,7 @@ from os.path import isfile
 from pathlib import Path
 from typing import List, Optional, Union
 from urllib.parse import urljoin, unquote, urlparse
+from warnings import deprecated
 
 import dateutil.parser
 import feedparser
@@ -32,7 +33,6 @@ from loguru import logger as log
 # noinspection PyUnresolvedReferences
 from lxml import etree
 from mashumaro.mixins.json import DataClassJSONMixin
-from typing_extensions import deprecated
 
 from stoat_webhook import StoatWebhook, StoatMasquerade, StoatEmbed
 
