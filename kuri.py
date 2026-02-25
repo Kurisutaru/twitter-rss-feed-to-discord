@@ -306,6 +306,27 @@ class WebhookMediaPayload:
         return self.image_count + self.video_count
 
 
+@dataclass
+class DestinationCheckpoints:
+    """Per-destination, per-handler checkpoints for last processed tweet timestamps."""
+    destinations: dict[str, dict[str, datetime]] = field(default_factory=dict)
+
+    def get(self, destination: str, handler: str) -> datetime:
+        """Get cutoff time for a destination+handler, defaults to year 2000."""
+        return self.destinations.get(destination, {}).get(handler, datetime(2000, 1, 1))
+
+    def update(self, destination: str, handler: str, dt: datetime):
+        """Update checkpoint only if dt is newer than existing."""
+        current = self.destinations.setdefault(destination, {}).get(handler, datetime.min)
+        if dt > current:
+            self.destinations[destination][handler] = dt
+
+    def merge(self, other: "DestinationCheckpoints"):
+        """Merge another checkpoint into this one (other takes priority)."""
+        for destination, handlers in other.destinations.items():
+            self.destinations.setdefault(destination, {}).update(handlers)
+
+
 @dataclass(frozen=True)
 class RandomEmbedColor:
     """
@@ -479,73 +500,69 @@ def write_last_run(timestamp: datetime, filename: str = __last_run_file):
         log.error(f"Error writing last run timestamp: {write_error}")
 
 
-def read_last_run_per_handler(filename: str = __last_run_file) -> dict[str, datetime]:
+def read_last_run_per_handler(filename: str = __last_run_file) -> DestinationCheckpoints:
     """
-    Read per-handler timestamps from JSON file using orjson.
-    Returns dict mapping handler name -> last processed datetime (UTC, timezone-naive).
+    Read per-destination, per-handler timestamps from JSON file.
+    Returns DestinationCheckpoints with structure: { destination -> { handler -> datetime } }
+    Got problem when let say one of the endpoint were failed, it marks all of them failed
+    It just happen on this patch
     """
     try:
-        if os.path.exists(filename):
-            with open(filename, 'rb') as file:
-                data = orjson.loads(file.read())
+        if not os.path.exists(filename):
+            log.info("No last_run.json found, starting fresh for all handlers")
+            return DestinationCheckpoints()
 
+        with open(filename, 'rb') as file:
+            data = orjson.loads(file.read())
+
+        def parse_handlers(handlers: dict) -> dict[str, datetime]:
             result = {}
-            for handler, timestamp_str in data.items():
-                # CHANGED: Use dateutil.parser instead of datetime.fromisoformat
+            for handler, timestamp_str in handlers.items():
                 dt = dateutil.parser.parse(timestamp_str)
-
-                # Normalize to UTC timezone-naive
                 if dt.tzinfo is not None:
                     dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
                 result[handler] = dt
-
-            log.info(f"Loaded checkpoints for {len(result)} handlers")
             return result
-        else:
-            log.info("No last_run.json found, starting fresh for all handlers")
-            return {}
+
+        checkpoints = DestinationCheckpoints(
+            destinations={dest: parse_handlers(handlers) for dest, handlers in data.items()}
+        )
+
+        for dest, handlers in checkpoints.destinations.items():
+            log.info(f"Loaded checkpoints: {len(handlers)} handlers for [{dest}]")
+
+        return checkpoints
+
     except Exception as e:
-        log.error(f"Error reading checkpoints: {e}, using empty dict")
-        return {}
+        log.error(f"Error reading checkpoints: {e}, using empty")
+        return DestinationCheckpoints()
 
 
-def write_last_run_per_handler(checkpoints: dict[str, datetime], filename: str = __last_run_file):
+def write_last_run_per_handler(checkpoints: DestinationCheckpoints, filename: str = __last_run_file):
     """
-    Write per-handler timestamps to JSON file with atomic write pattern.
+    Write per-destination, per-handler timestamps to JSON file with atomic write pattern.
     Prevents corruption if script crashes during write.
     """
     try:
-        # Prepare data: convert datetime to ISO strings
-        data = {}
-        for handler, dt in checkpoints.items():
-            # Ensure UTC timezone-naive
-            if dt.tzinfo is not None:
-                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-            data[handler] = dt.isoformat()
+        def serialize_handlers(handlers: dict[str, datetime]) -> dict[str, str]:
+            result = {}
+            for handler, dt in handlers.items():
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                result[handler] = dt.isoformat()
+            return result
 
-        # Get directory for temp file (must be same filesystem for atomic rename)
+        data = {dest: serialize_handlers(handlers) for dest, handlers in checkpoints.destinations.items()}
+
         file_dir = os.path.dirname(filename) or script_dir
-
-        # Create temp file in same directory
-        fd, temp_path = tempfile.mkstemp(
-            suffix='.tmp',
-            prefix='last_run_',
-            dir=file_dir,
-            text=False  # Binary mode for orjson
-        )
+        fd, temp_path = tempfile.mkstemp(suffix='.tmp', prefix='last_run_', dir=file_dir, text=False)
 
         try:
-            # Write to temp file
             with os.fdopen(fd, 'wb') as temp_file:
                 temp_file.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
-
-            # Atomic rename (replaces old file)
             shutil.move(temp_path, filename)
-
-            log.info(f"✅ Atomically updated checkpoints for {len(checkpoints)} handlers")
-
+            log.info(f"✅ Atomically updated checkpoints")
         except Exception as write_error:
-            # Clean up temp file on failure
             try:
                 os.unlink(temp_path)
             except OSError:
@@ -558,7 +575,7 @@ def write_last_run_per_handler(checkpoints: dict[str, datetime], filename: str =
 
 def migrate_old_checkpoint():
     """
-    One-time migration from single-file last_run.txt to per-handler last_run.json.
+    One-time migration from single-file last_run.txt to per-destination/handler last_run.json.
     Safe to run multiple times - only migrates if old file exists and new doesn't.
     """
     old_file = os.path.join(script_dir, 'last_run.txt')
@@ -566,23 +583,20 @@ def migrate_old_checkpoint():
 
     if os.path.exists(old_file) and not os.path.exists(new_file):
         try:
-            log.info("Found old last_run.txt, migrating to per-handler format...")
+            log.info("Found old last_run.txt, migrating to per-destination/handler format...")
 
-            # Read old timestamp using existing function
             old_timestamp = read_last_run(old_file)
 
-            # Apply to all handlers
-            checkpoints = {
-                item.twitterHandleName: old_timestamp
-                for item in main_config.twitterWatch
-            }
+            checkpoints = DestinationCheckpoints()
+            for item in main_config.twitterWatch:
+                if item.discordWebhookUrl:
+                    checkpoints.update("discord", item.twitterHandleName, old_timestamp)
+                if item.stoatWebhookUrl:
+                    checkpoints.update("stoat", item.twitterHandleName, old_timestamp)
 
-            # Write new format
             write_last_run_per_handler(checkpoints, new_file)
+            log.info(f"✅ Migrated checkpoint to per-destination/handler format")
 
-            log.info(f"✅ Migrated checkpoint to per-handler format for {len(checkpoints)} handlers")
-
-            # Backup old file
             backup_file = old_file + '.backup'
             shutil.move(old_file, backup_file)
             log.info(f"Backed up old file to {backup_file}")
@@ -1809,7 +1823,14 @@ async def main():
 
                 # CHANGED: Get cutoff time for THIS specific handler
                 handler_name = item.twitterHandleName
-                cutoff_time = checkpoints.get(handler_name, datetime(2000, 1, 1))
+                cutoff_candidates = []
+                if item.discordWebhookUrl:
+                    cutoff_candidates.append(checkpoints.get("discord", handler_name))
+                if item.stoatWebhookUrl:
+                    cutoff_candidates.append(checkpoints.get("stoat", handler_name))
+
+                # Fallback if somehow neither is configured
+                cutoff_time = min(cutoff_candidates) if cutoff_candidates else datetime.utcnow()
                 log.info(f"Processing {handler_name}, cutoff: {cutoff_time} (UTC)")
 
                 # Add to twitter_user_list
@@ -1875,8 +1896,8 @@ async def main():
 
             # Post count
             posted_count = 0
-            # CHANGED: Track latest post per handler
-            latest_by_handler: dict[str, datetime] = {}
+            # Now using dataclass for multiple target (Stoat and Discord)
+            latest = DestinationCheckpoints()
 
             post_start = time.time()
 
@@ -1888,52 +1909,55 @@ async def main():
 
                 try:
                     log.info(f"Posting tweet from {data.key} at {data.pubdate}: {data.link}")
-                    if twitter_user.discordWebhookUrl:
-                        success = await send_to_discord_with_media(
-                            session=session,
-                            tweet_link=data.link,
-                            embed_title=data.description,
-                            tweet_media_list=data.mediaList,
-                            tweet_has_video=data.hasVideo,
-                            timestamp=data.timestamp,
-                            twitter_user=twitter_user
-                        )
-                    if twitter_user.stoatWebhookUrl:
-                        success = await send_to_stoat_with_media(
-                            session=session,
-                            tweet_link=data.link,
-                            embed_title=data.description,
-                            tweet_media_list=data.mediaList,
-                            tweet_has_video=data.hasVideo,
-                            timestamp=data.timestamp,
-                            twitter_user=twitter_user
-                        )
 
-                    if success:
+                    discord_success = False
+                    stoat_success = False
+
+                    if twitter_user.discordWebhookUrl and data.pubdate > checkpoints.get("discord", data.key):
+                        discord_success = await send_to_discord_with_media(
+                            session=session,
+                            tweet_link=data.link,
+                            embed_title=data.description,
+                            tweet_media_list=data.mediaList,
+                            tweet_has_video=data.hasVideo,
+                            timestamp=data.timestamp,
+                            twitter_user=twitter_user
+                        )
+                        if discord_success:
+                            latest.update("discord", data.key, data.pubdate)
+
+                    if twitter_user.stoatWebhookUrl and data.pubdate > checkpoints.get("stoat", data.key):
+                        stoat_success = await send_to_stoat_with_media(
+                            session=session,
+                            tweet_link=data.link,
+                            embed_title=data.description,
+                            tweet_media_list=data.mediaList,
+                            tweet_has_video=data.hasVideo,
+                            timestamp=data.timestamp,
+                            twitter_user=twitter_user
+                        )
+                        if stoat_success:
+                            latest.update("stoat", data.key, data.pubdate)
+
+                    if discord_success or stoat_success:
                         posted_count += 1
-
-                        # CHANGED: Track latest successful post per handler
-                        if data.key not in latest_by_handler or data.pubdate > latest_by_handler[data.key]:
-                            latest_by_handler[data.key] = data.pubdate
-
                         log.info(f"✅ Successfully posted tweet from {data.key} at {data.pubdate}")
 
                 except Exception as post_error:
-                    log.error(f"Error posting to Discord: {post_error}")
+                    log.error(f"Error posting: {post_error}")
                     continue
 
             log.info(f"⏱️ Webhook posting took: {time.time() - post_start:.2f}s")
             log.info(f"Successfully posted {posted_count}/{len(entry_data)} tweets")
 
-            # CHANGED: Update per-handler checkpoints
-            if latest_by_handler:
-                # Merge with existing checkpoints (don't lose other handlers)
-                updated_checkpoints = {**checkpoints, **latest_by_handler}
-                write_last_run_per_handler(updated_checkpoints)
+            # Merge latest into checkpoints and save
+            if latest.destinations:
+                checkpoints.merge(latest)
+                write_last_run_per_handler(checkpoints)
 
-                log.info(f"✅ Updated checkpoints for {len(latest_by_handler)} handlers:")
-                for handler, timestamp in latest_by_handler.items():
-                    log.info(f"  - {handler}: {timestamp}")
+                for dest, handlers in latest.destinations.items():
+                    for handler, ts in handlers.items():
+                        log.info(f"  - [{dest}] {handler}: {ts}")
             elif entry_data and posted_count == 0:
                 log.warning("⚠️ Had entries but failed to post any - NOT updating checkpoint")
             else:
