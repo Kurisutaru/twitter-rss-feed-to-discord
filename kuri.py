@@ -3,6 +3,7 @@ import atexit
 import calendar
 import hashlib
 import os
+import platform
 import random
 import re
 import shutil
@@ -70,87 +71,172 @@ log.add(log_file, rotation="sunday", compression=kuri_zip_compression,
 
 
 class ScriptLock:
-    """Prevents multiple instances of the script from running simultaneously"""
+    """
+    Prevents multiple instances of the script from running simultaneously.
 
-    def __init__(self, lock_file='script.lock', logger=None):
-        self.lock_file = os.path.join(script_dir, lock_file)
+    Fixes vs original:
+    - Atomic O_CREAT|O_EXCL creation eliminates TOCTOU race condition
+    - /proc/<pid>/cmdline check guards against PID recycling false-positives
+    - `platform` imported once at module level, not per-call
+    - Context manager support (__enter__ / __exit__)
+    - _safe_remove() helper prevents bare os.remove() crashes
+    """
+
+    def __init__(self, lock_file='script.lock', script_dir=None, logger=None):
+        base = script_dir or os.path.dirname(os.path.abspath(__file__))
+        self.lock_file = os.path.join(base, lock_file)
         self.locked = False
-        self.log = logger if logger else log
+        self.log = logger
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def acquire(self):
-        """Acquire the lock. If another instance is running, exit."""
+        """
+        Acquire the lock atomically.
+        - If a live instance already holds it → log and exit.
+        - If the lock file is stale (dead PID or corrupt) → remove and retry.
+        - Uses O_CREAT|O_EXCL so only one process can succeed.
+        """
+        # ── Handle any pre-existing lock file ──────────────────────────
         if os.path.exists(self.lock_file):
             try:
-                with open(self.lock_file, 'r') as file:
-                    old_pid = int(file.read().strip())
+                with open(self.lock_file, 'r') as f:
+                    old_pid = int(f.read().strip())
 
                 if self._is_process_running(old_pid):
-                    self.log.warning(f"Script is already running (PID: {old_pid}). Exiting.")
+                    self._log('warning',
+                              f"Script already running (PID: {old_pid}). Exiting.")
                     sys.exit(0)
                 else:
-                    self.log.info(f"Removing stale lock file (PID: {old_pid})")
-                    os.remove(self.lock_file)
+                    self._log('info',
+                              f"Removing stale lock file (PID: {old_pid} no longer alive)")
+                    self._safe_remove(self.lock_file)
+
             except (ValueError, IOError):
-                self.log.warning("Removing invalid lock file")
-                os.remove(self.lock_file)
+                self._log('warning', "Removing invalid/unreadable lock file")
+                self._safe_remove(self.lock_file)
 
+        # ── Atomic creation: only ONE process wins O_CREAT|O_EXCL ──────
         try:
-            with open(self.lock_file, 'w') as file:
-                file.write(str(os.getpid()))
-            self.locked = True
-            self.log.info(f"Lock acquired (PID: {os.getpid()})")
+            fd = os.open(
+                self.lock_file,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+            try:
+                os.write(fd, str(os.getpid()).encode())
+            finally:
+                os.close(fd)
 
-            atexit.register(self.release)
-            signal.signal(signal.SIGTERM, self._signal_handler)
-            signal.signal(signal.SIGINT, self._signal_handler)
-            return True
-        except IOError as e:
-            self.log.error(f"Failed to create lock file: {e}")
+        except FileExistsError:
+            # Another process just created it between our check and here
+            self._log('warning',
+                      "Lock file appeared mid-flight (race). Another instance "
+                      "just started. Exiting.")
+            sys.exit(0)
+
+        except OSError as e:
+            self._log('error', f"Failed to create lock file: {e}")
             sys.exit(1)
 
+        self.locked = True
+        self._log('info', f"Lock acquired (PID: {os.getpid()})")
+
+        atexit.register(self.release)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+        return True
+
     def release(self):
-        """Release the lock by removing the lock file"""
-        if self.locked and os.path.exists(self.lock_file):
-            try:
-                os.remove(self.lock_file)
-                self.locked = False
-                self.log.info("Lock released")
-            except OSError as e:
-                self.log.error(f"Failed to remove lock file: {e}")
+        """Release the lock by removing the lock file."""
+        if self.locked:
+            self._safe_remove(self.lock_file)
+            self.locked = False
+            self._log('info', "Lock released")
+
+    # ------------------------------------------------------------------
+    # Context manager
+    # ------------------------------------------------------------------
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+        return False  # do not suppress exceptions
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
 
     def _signal_handler(self, signum, frame):
-        """Handle termination signals"""
-        self.log.info(f"Received signal {signum}, releasing lock")
+        self._log('info', f"Received signal {signum}, releasing lock")
         self.release()
         sys.exit(0)
 
-    def _is_process_running(self, pid):
-        """Check if a process with the given PID is running (cross-platform)."""
-        import platform
+    def _is_process_running(self, pid: int) -> bool:
+        """
+        Check if a process with the given PID is actually still running.
 
+        On Linux/macOS we go one step further than os.kill(pid, 0):
+        we verify /proc/<pid>/cmdline contains our script name to guard
+        against PID recycling (the PID exists but belongs to a different
+        program now).
+        """
         if platform.system() == "Windows":
             import subprocess
             try:
                 result = subprocess.run(
                     ['tasklist', '/FI', f'PID eq {pid}', '/NH', '/FO', 'CSV'],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
+                    capture_output=True, text=True, timeout=5
                 )
                 return str(pid) in result.stdout
             except (subprocess.SubprocessError, FileNotFoundError):
                 return False
-        else:
+
+        # ── POSIX ───────────────────────────────────────────────────────
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False  # process is definitely gone
+
+        # Guard against PID recycling on Linux via /proc
+        cmdline_path = f"/proc/{pid}/cmdline"
+        if os.path.exists(cmdline_path):
             try:
-                os.kill(pid, 0)
-                return True
+                with open(cmdline_path, 'rb') as f:
+                    cmdline = f.read().replace(b'\x00', b' ').decode(errors='replace')
+                script_name = os.path.basename(__file__)
+                if script_name not in cmdline:
+                    # PID exists but it's a different program — treat as stale
+                    return False
             except OSError:
-                return False
+                pass  # /proc disappeared mid-read → process died, treat as gone
 
+        return True
 
-# ===== PROCESS LOCK =====
-lock = ScriptLock('kuri.lock')
-lock.acquire()
+    @staticmethod
+    def _safe_remove(path: str) -> None:
+        """Remove a file, silently ignoring 'already gone' errors."""
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            # Log if something genuinely unexpected happens
+            print(f"[ScriptLock] Warning: could not remove {path}: {e}",
+                  file=sys.stderr)
+
+    def _log(self, level: str, msg: str) -> None:
+        """Emit a log message through the injected logger or fall back to stderr."""
+        if self.log:
+            getattr(self.log, level)(msg)
+        else:
+            print(f"[ScriptLock/{level.upper()}] {msg}", file=sys.stderr)
+
 
 # emoji
 __emoji_play = '▶️'
@@ -1950,4 +2036,5 @@ async def main():
 
 if __name__ == "__main__":
     # Run the async main function
-    asyncio.run(main())
+    with ScriptLock('kuri.lock', script_dir=script_dir, logger=log) as lock:
+        asyncio.run(main())
