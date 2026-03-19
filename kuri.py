@@ -34,7 +34,7 @@ from loguru import logger as log
 from lxml import etree
 from mashumaro.mixins.json import DataClassJSONMixin
 
-from stoat_webhook import StoatWebhook, StoatMasquerade, StoatEmbed
+from stoat_webhook import StoatWebhook, StoatEmbed, StoatMasquerade
 
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -220,9 +220,16 @@ class EntryData:
 class Config:
     embedFooterText: str
     embedFooterImageUrl: str
-    includeReTweet: bool
-    generateEmbed: bool
-    useFxTwitterLinkInDiscord: bool
+    includeReTweet: bool = False
+    generateEmbed: bool = False
+    useFxTwitterLinkInDiscord: bool = False
+    useCustomProfile: bool = False
+
+
+@dataclass
+class Profile:
+    username: str
+    avatarUrl: str
 
 
 @dataclass
@@ -237,6 +244,7 @@ class TwitterWatch:
 @dataclass
 class TwitterDiscordConfig(DataClassJSONMixin):
     config: Config
+    profile: Profile
     nitterServer: list[str]
     twitterWatch: list[TwitterWatch]
 
@@ -1437,6 +1445,10 @@ async def post_to_single_discord_webhook(
             log.info("Sending with embed (generateEmbed=True)")
             webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
 
+            if main_config.config.useCustomProfile:
+                webhook.username = main_config.profile.username
+                webhook.avatar_url = main_config.profile.avatarUrl
+
             # Attach author icon
             if payload.author_icon_data:
                 webhook.add_file(file=payload.author_icon_data, filename=payload.author_icon_filename)
@@ -1487,6 +1499,10 @@ async def post_to_single_discord_webhook(
             # Send just content without embed (simple mode)
             log.info("Sending without embed (generateEmbed=False)")
             webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
+
+            if main_config.config.useCustomProfile:
+                webhook.username = main_config.profile.username
+                webhook.avatar_url = main_config.profile.avatarUrl
 
             response = webhook.execute()
             if response.ok:
@@ -1564,6 +1580,13 @@ async def post_to_single_stoat_webhook(
             # )
             # webhook.set_masquerade(masquerade)
 
+            if main_config.config.useCustomProfile:
+                masquerade = StoatMasquerade()
+                masquerade.name = main_config.profile.username
+                masquerade.avatar_url = main_config.profile.avatarUrl
+                masquerade.colour = RandomEmbedColor.random_gradient()
+                webhook.masquerade = masquerade
+
             embed = generate_stoat_embed_data(
                 title=payload.cleaned_description,
                 payload=payload,
@@ -1592,6 +1615,14 @@ async def post_to_single_stoat_webhook(
             # Send just content without embed (simple mode)
             log.info("Sending without embed (generateEmbed=False)")
             webhook = StoatWebhook(webhook_url=webhook_url, rate_limit_retry=True)
+
+            if main_config.config.useCustomProfile:
+                masquerade = StoatMasquerade()
+                masquerade.name = main_config.profile.username
+                masquerade.avatar_url = main_config.profile.avatarUrl
+                masquerade.colour = RandomEmbedColor.random_gradient()
+                webhook.masquerade = masquerade
+
             webhook.set_content(content)
 
             response = await webhook.execute()
@@ -1601,61 +1632,6 @@ async def post_to_single_stoat_webhook(
             else:
                 log.error(f"❌ Failed to post content. HTTP {response.status_code}")
                 return False
-
-    except Exception as webhook_error:
-        log.error(f"❌ Error sending to webhook: {webhook_error}")
-        return False
-
-        # Create webhook instance (no content here)
-        webhook = StoatWebhook(
-            webhook_url=webhook_url,
-            session=session,
-            rate_limit_retry=True
-        )
-
-        # forgot to remove, just code try the feature
-        # masquerade = StoatMasquerade(
-        #     name=twitter_user.name,
-        #     avatar=twitter_user.icon,
-        #     colour=RandomEmbedColor.random_pastel_gradient()
-        # )
-        # webhook.set_masquerade(masquerade)
-
-        if main_config.config.generateEmbed:
-            log.info("Sending with embed (generateEmbed=True)")
-
-            # Build embed
-            embed = generate_stoat_embed_data(
-                title=payload.cleaned_description,
-                payload=payload,
-                timestamp=timestamp,
-                author_name=twitter_user.name,
-                author_url=twitter_user.link,
-                author_icon_url=twitter_user.icon
-            )
-            webhook.add_embed(embed)
-
-            webhook.set_content(content)
-
-        else:
-            log.info("Sending without embed (generateEmbed=False)")
-            # Just content (tweet link or whatever)
-            webhook.set_content(content)
-
-        # Execute
-        response = await webhook.execute(
-            remove_embeds=True,
-            remove_attachments=True,
-            clear_state=True
-        )
-
-        if response.ok:
-            log.info(f"✅ Posted successfully (HTTP {response.status})")
-            return True
-        else:
-            text = await response.text()
-            log.error(f"❌ Failed to post. HTTP {response.status} - {text}")
-            return False
 
     except Exception as e:
         log.error(f"❌ Error sending to webhook {webhook_url[:50]}...: {e}")
