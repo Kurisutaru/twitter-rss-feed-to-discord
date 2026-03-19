@@ -4,21 +4,21 @@
     "embedFooterImageUrl" : "https://i.imgur.com/yae4JIT.png",
     "includeReTweet" : false,
     "generateEmbed" : true,
-    "useFxTwitterLinkInDiscord" : false
+    "useFxTwitterLinkInDiscord" : false,
+    "useCustomProfile": true
+  },
+  "profile" : {
+    "username" : "Kuri Test 123™",
+    "avatarUrl" : "https://i.imgur.com/nIqgr0G.png"
   },
   "nitterServer" : ["https://nitter.d420.de"],
   "twitterWatch" : [
     {
       "twitterHandleName" : "priconne_redive",
-      "webhookUrl" : ["", ""],
+      "discordWebhookUrl" : ["", ""],
       "discordMention" : true,
-      "discordMentionRoleId" : ["1234567890", "0987654321"]
-    },
-    {
-      "twitterHandleName" : "priconne_redive",
-      "webhookUrl" : ["", ""],
-      "discordMention" : true,
-      "discordMentionRoleId" : ["1234567890", "0987654321"]
+      "discordMentionRoleId" : [""],
+      "stoatWebhookUrl" : ["", ""]
     }
   ]
 }
