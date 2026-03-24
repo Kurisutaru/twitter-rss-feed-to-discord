@@ -15,6 +15,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from io import BytesIO
 from operator import attrgetter
 from os.path import isfile
 from pathlib import Path
@@ -23,11 +24,12 @@ from urllib.parse import urljoin, unquote, urlparse
 from warnings import deprecated
 
 import dateutil.parser
+import discord
 import feedparser
 import orjson
 from aiohttp import ClientSession, TCPConnector, ClientTimeout
 from bs4 import BeautifulSoup
-from discord_webhook import DiscordEmbed, DiscordWebhook
+from discord.ui import LayoutView
 from feedparser import FeedParserDict
 from loguru import logger as log
 # Keep lxml import – used in RSS patching
@@ -82,8 +84,8 @@ class ScriptLock:
     - _safe_remove() helper prevents bare os.remove() crashes
     """
 
-    def __init__(self, lock_file='script.lock', script_dir=None, logger=None):
-        base = script_dir or os.path.dirname(os.path.abspath(__file__))
+    def __init__(self, lock_file='script.lock', script_dir_param=None, logger=None):
+        base = script_dir_param or os.path.dirname(os.path.abspath(__file__))
         self.lock_file = os.path.join(base, lock_file)
         self.locked = False
         self.log = logger
@@ -102,8 +104,8 @@ class ScriptLock:
         # ── Handle any pre-existing lock file ──────────────────────────
         if os.path.exists(self.lock_file):
             try:
-                with open(self.lock_file, 'r') as f:
-                    old_pid = int(f.read().strip())
+                with open(self.lock_file, 'r') as file:
+                    old_pid = int(file.read().strip())
 
                 if self._is_process_running(old_pid):
                     self._log('warning',
@@ -207,11 +209,11 @@ class ScriptLock:
         cmdline_path = f"/proc/{pid}/cmdline"
         if os.path.exists(cmdline_path):
             try:
-                with open(cmdline_path, 'rb') as f:
-                    cmdline = f.read().replace(b'\x00', b' ').decode(errors='replace')
+                with open(cmdline_path, 'rb') as file:
+                    cmdline = file.read().replace(b'\x00', b' ').decode(errors='replace')
                 script_name = os.path.basename(__file__)
                 if script_name not in cmdline:
-                    # PID exists but it's a different program — treat as stale
+                    # PID exists, but it's a different program — treat as stale
                     return False
             except OSError:
                 pass  # /proc disappeared mid-read → process died, treat as gone
@@ -257,6 +259,7 @@ __video_upload_content: str = f"{__emoji_play}{__braille_pattern_blank}"
 __footer_append_template: str = ' • {}'
 __discord_maximum_file_size: int = 10
 __discord_maximum_embed_character: int = 4096
+__discord_component_v2_split_image_count : int = 4
 
 # JSONFile
 __json_file: str = 'kuri.config.json'
@@ -310,6 +313,7 @@ class Config:
     generateEmbed: bool = False
     useFxTwitterLinkInDiscord: bool = False
     useCustomProfile: bool = False
+    useDiscordComponentV2: bool = False
 
 
 @dataclass
@@ -424,7 +428,7 @@ class DestinationCheckpoints:
 @dataclass(frozen=True)
 class RandomEmbedColor:
     """
-    Generates a random colour and provides it in multiple formats useful for:
+    Generates a random color and provides it in multiple formats useful for:
     - Discord: .int, .discord_int
     - Stoat/Revolt: .hex, .string, .hexcode
     - General use: .rgb_tuple, .rgba_tuple, .css_rgb, .css_rgba
@@ -437,7 +441,7 @@ class RandomEmbedColor:
 
     @classmethod
     def random(cls) -> "RandomEmbedColor":
-        """Factory method to create a random opaque colour."""
+        """Factory method to create a random opaque color."""
         return cls(
             r=random.randint(0, 255),
             g=random.randint(0, 255),
@@ -448,7 +452,7 @@ class RandomEmbedColor:
     @classmethod
     def random_pastel(cls, saturation: float = 0.5) -> "RandomEmbedColor":
         """
-        Generate a random pastel colour.
+        Generate a random pastel color.
 
         Args:
             saturation: How much to blend with white (0.0-1.0).
@@ -474,7 +478,7 @@ class RandomEmbedColor:
 
     @classmethod
     def random_with_alpha(cls, alpha: int = 255) -> "RandomEmbedColor":
-        """Random colour with custom alpha (0–255)."""
+        """Random color with custom alpha (0–255)."""
         return cls.random().__class__(r=cls.random().r, g=cls.random().g, b=cls.random().b, a=alpha)
 
     @classmethod
@@ -496,14 +500,14 @@ class RandomEmbedColor:
         return f"linear-gradient(to right, {c1}, {c2})"
 
     @property
-    def int(self) -> int:
+    def color_int(self) -> int:
         """Discord-style integer (0xRRGGBB)."""
         return (self.r << 16) | (self.g << 8) | self.b
 
     @property
     def discord_int(self) -> int:
         """Same as .int — explicit alias for Discord."""
-        return self.int
+        return self.color_int
 
     @property
     def hex(self) -> str:
@@ -547,7 +551,7 @@ class RandomEmbedColor:
 
     def __int__(self) -> int:
         """Casting to int gives Discord integer."""
-        return self.int
+        return self.color_int
 
 
 # Check if config file exist, if not abort
@@ -1189,22 +1193,22 @@ def generate_embed_color() -> int:
 
 def generate_discord_embed_data(title: str, payload: WebhookMediaPayload,
                                 timestamp: float, author_name: str = None, author_url: str = None,
-                                author_icon_url: str = None) -> DiscordEmbed:
+                                author_icon_url: str = None) -> discord.Embed:
     """Create embed object for webhook."""
-    embed = DiscordEmbed()
+    embed = discord.Embed()
 
     if author_name and author_url:
         embed.set_author(name=author_name,
                          url=author_url,
                          icon_url=author_icon_url)
 
-    embed.set_color(RandomEmbedColor.random().discord_int)
+    embed.colour = RandomEmbedColor.random().discord_int
 
     if timestamp:
-        embed.set_timestamp(timestamp)
+        embed.timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc)
 
     if title:
-        embed.set_description(clean_tweet_text(title))
+        embed.description = clean_tweet_text(title)
 
     footer = main_config.config.embedFooterText
 
@@ -1237,6 +1241,68 @@ def generate_stoat_embed_data(title: str, payload: WebhookMediaPayload,
         embed.icon_url = author_icon_url
 
     return embed
+
+# Hey its B E T A
+# Gonna replicate most of the part like old embed
+def generate_discord_container_v2_data(
+        title: str,
+        payload: WebhookMediaPayload,
+        timestamp: float,
+        author_name: str = None,
+        author_url: str = None,
+        author_icon_filename: str = None,
+        author_icon_url: str = None,
+        tweet_link: str = None,
+) -> discord.ui.Container:
+    container = discord.ui.Container(accent_color=RandomEmbedColor.random().discord_int)
+
+    # First SECTION: author + content side by side with avatar thumbnail and the content
+    icon_ref = (
+        f"attachment://{author_icon_filename}"
+        if author_icon_filename
+        else (author_icon_url or "")
+    )
+
+    # I feel its better use small heading ? instead normal text, to emphasize like old embed ?
+    author_line = f"### **[{author_name}]({author_url})**" if author_name else ""
+
+    cleaned = ""
+    if title:
+        cleaned = clean_tweet_text(title)
+        if tweet_link:
+            cleaned = truncate_text(cleaned, tweet_link)
+
+    section = discord.ui.Section(
+        *[item for item in [
+            discord.ui.TextDisplay(author_line) if author_line else None,
+            discord.ui.TextDisplay(cleaned) if cleaned else None,
+        ] if item is not None],
+        accessory=discord.ui.Thumbnail(icon_ref),
+    )
+    container.add_item(section)
+
+    # images blocks
+    if payload.image_count > 0:
+        # Split per 4 image so 2x2 grid ? or should I just dump all of them per 10 ?
+        for i in range(0, payload.image_count, __discord_component_v2_split_image_count):
+            split = payload.images[i:i + __discord_component_v2_split_image_count]
+            gallery = discord.ui.MediaGallery()
+            for media in split:
+                gallery.add_item(media=f"attachment://{media.filename}", description=media.filename, spoiler=False)
+            container.add_item(gallery)
+
+    # footer blocks
+    footer = main_config.config.embedFooterText
+    if payload.image_count > 0:
+        footer += __footer_append_template.format(f"{payload.image_count} {__emoji_photo}")
+    if payload.video_count > 0:
+        footer += __footer_append_template.format(f"{payload.video_count} {__emoji_video}")
+
+    # Add timestamps
+    footer += __footer_append_template.format(f"<t:{int(timestamp)}:R>")
+
+    container.add_item(discord.ui.TextDisplay(f"-# {footer}"))
+    return container
 
 
 async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url: str) -> Optional[FeedParserDict]:
@@ -1500,102 +1566,153 @@ async def post_to_single_discord_webhook(
 
         # === STEP 1: Send videos first ===
         if payload.videos:
-            log.info(f"📹 Sending {len(payload.videos)} video(s)...")
-            for video in payload.videos:
-                video_webhook = DiscordWebhook(
-                    url=webhook_url,
-                    rate_limit_retry=True
-                )
+            try:
+                log.info(f"📹 Sending {len(payload.videos)} video(s)...")
+                for video in payload.videos:
+                    video_webhook = discord.Webhook.from_url(
+                        url=webhook_url,
+                        session=session
+                    )
 
-                if video.data:
-                    # Video was downloaded, upload as file
-                    log.info(f"Uploading video as file: {video.filename}")
-                    video_webhook.content = __video_upload_content
-                    video_webhook.add_file(file=video.data, filename=video.filename)
-                else:
-                    # Video too large or download failed, send URL
-                    log.info(f"Sending video URL: {video.original_url}")
-                    video_webhook.content = __video_embed_content.format(video.original_url)
+                    if video.data:
+                        # Video was downloaded, upload as file
+                        log.info(f"Uploading video as file: {video.filename}")
+                        file = discord.File(fp=BytesIO(video.data), filename=video.filename)
+                        await video_webhook.send(content=__video_upload_content.format(video.original_url),
+                                                 file=file)
+                    else:
+                        # Video too large or download failed, send URL
+                        log.info(f"Sending video URL: {video.original_url}")
+                        await video_webhook.send(content=__video_embed_content.format(video.original_url))
 
-                video_response = video_webhook.execute()
-
-                if video_response.ok:
                     log.info(f"✅ Video posted: {video.filename}")
-                else:
-                    log.error(f"❌ Failed to post video. HTTP {video_response.status_code}")
-                    return False
+            except discord.HTTPException as e:
+                log.error(f"❌ Failed to post video. HTTP {e.status} {e.text}")
+                return False
 
         # === STEP 2: Send content with or without embed ===
+        # Reuseable
+        webhook = discord.Webhook.from_url(url=webhook_url, session=session)
+        username = None
+        avatar_url = None
+
+        if main_config.config.useCustomProfile:
+            username = main_config.profile.username
+            avatar_url = main_config.profile.avatarUrl
+
         if main_config.config.generateEmbed:
             # Send with embed (original behavior)
             log.info("Sending with embed (generateEmbed=True)")
-            webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
 
-            if main_config.config.useCustomProfile:
-                webhook.username = main_config.profile.username
-                webhook.avatar_url = main_config.profile.avatarUrl
-
-            # Attach author icon
+            # Build author icon ref (shared between V1 and V2)
             if payload.author_icon_data:
-                webhook.add_file(file=payload.author_icon_data, filename=payload.author_icon_filename)
+                files = [discord.File(fp=BytesIO(payload.author_icon_data), filename=payload.author_icon_filename)]
                 author_icon_url = f"attachment://{payload.author_icon_filename}"
             else:
+                files = []
                 author_icon_url = twitter_user.icon
 
             # Attach all images
             for media in payload.all_attachments:
-                webhook.add_file(file=media.data, filename=media.filename)
+                files.append(discord.File(fp=BytesIO(media.data), filename=media.filename))
 
-            # Create embeds
-            if payload.images:
-                for idx, media in enumerate(payload.images):
-                    is_first = idx == 0
-                    embed = generate_discord_embed_data(
-                        title=payload.cleaned_description if is_first else "",
-                        payload=payload,
-                        timestamp=timestamp if is_first else None,
-                        author_name=twitter_user.name if is_first else None,
-                        author_url=twitter_user.link if is_first else None,
-                        author_icon_url=author_icon_url if is_first else None
-                    )
-                    embed.set_image(url=f"attachment://{media.filename}")
-                    embed.set_url(tweet_link)
-                    webhook.add_embed(embed)
-            else:
-                # No images, just text embed
-                embed = generate_discord_embed_data(
+            # Component V2
+            if main_config.config.useDiscordComponentV2:
+                log.info("Sending with Component V2 (generateEmbed=True, useDiscordComponentV2=True)")
+
+                author_icon_filename = payload.author_icon_filename if payload.author_icon_data else None
+                author_icon_url_fallback = twitter_user.icon if not author_icon_filename else None
+
+                # Top-level text: tweet link + optional role mentions
+                top_text_parts = discord.ui.TextDisplay(content)
+
+                container = generate_discord_container_v2_data(
                     title=payload.cleaned_description,
                     payload=payload,
                     timestamp=timestamp,
                     author_name=twitter_user.name,
                     author_url=twitter_user.link,
-                    author_icon_url=author_icon_url
+                    author_icon_filename=author_icon_filename,
+                    author_icon_url=author_icon_url_fallback,
+                    tweet_link=tweet_link,
                 )
-                embed.set_url(tweet_link)
-                webhook.add_embed(embed)
 
-            response = webhook.execute()
-            if response.ok:
-                log.info(f"✅ Embed posted successfully")
-                return True
+                try:
+                    layout = LayoutView()
+                    layout.add_item(top_text_parts)
+                    layout.add_item(container)
+
+                    await webhook.send(
+                        view=layout,
+                        files=files or discord.utils.MISSING,
+                        username=username,
+                        avatar_url=avatar_url,
+                        allowed_mentions=discord.AllowedMentions(roles=True),
+                    )
+                    log.info("✅ Component V2 posted successfully")
+                    return True
+                except discord.HTTPException as e:
+                    log.error(f"❌ Failed to post Component V2. HTTP {e.status}: {e.text}")
+                    return False
+
+            # Discord Embed
             else:
-                log.error(f"❌ Failed to post embed. HTTP {response.status_code} + {response.reason}")
-                return False
+                log.info("Sending with embed V1 (generateEmbed=True)")
+                embeds = []
+
+                if payload.images:
+                    for idx, media in enumerate(payload.images):
+                        is_first = idx == 0
+                        embed = generate_discord_embed_data(
+                            title=payload.cleaned_description if is_first else "",
+                            payload=payload,
+                            timestamp=timestamp if is_first else None,
+                            author_name=twitter_user.name if is_first else None,
+                            author_url=twitter_user.link if is_first else None,
+                            author_icon_url=author_icon_url if is_first else None,
+                        )
+                        embed.set_image(url=f"attachment://{media.filename}")
+                        embed.url = tweet_link
+                        embeds.append(embed)
+                else:
+                    # No images, text-only embed
+                    embed = generate_discord_embed_data(
+                        title=payload.cleaned_description,
+                        payload=payload,
+                        timestamp=timestamp,
+                        author_name=twitter_user.name,
+                        author_url=twitter_user.link,
+                        author_icon_url=author_icon_url,
+                    )
+                    embed.url = tweet_link
+                    embeds.append(embed)
+
+                try:
+                    await webhook.send(
+                        content=content,
+                        embeds=embeds,
+                        files=files,
+                        username=username,
+                        avatar_url=avatar_url,
+                    )
+                    log.info("✅ Embed V1 posted successfully")
+                    return True
+                except discord.HTTPException as e:
+                    log.error(f"❌ Failed to post embed V1. HTTP {e.status}: {e.text}")
+                    return False
         else:
             # Send just content without embed (simple mode)
             log.info("Sending without embed (generateEmbed=False)")
-            webhook = DiscordWebhook(url=webhook_url, content=content, rate_limit_retry=True)
-
-            if main_config.config.useCustomProfile:
-                webhook.username = main_config.profile.username
-                webhook.avatar_url = main_config.profile.avatarUrl
-
-            response = webhook.execute()
-            if response.ok:
-                log.info(f"✅ Content posted successfully")
+            try:
+                await webhook.send(
+                    content=content,
+                    username=username,
+                    avatar_url=avatar_url
+                )
+                log.info("✅ Embed posted successfully")
                 return True
-            else:
-                log.error(f"❌ Failed to post content. HTTP {response.status_code}")
+            except discord.HTTPException as e:
+                log.error(f"❌ Failed to post embed. HTTP {e.status}: {e.text}")
                 return False
 
     except Exception as webhook_error:
@@ -1662,7 +1779,7 @@ async def post_to_single_stoat_webhook(
             # masquerade = StoatMasquerade(
             #     name=twitter_user.name,
             #     avatar=twitter_user.icon,
-            #     colour=RandomEmbedColor.random_pastel_gradient()
+            #     color=RandomEmbedColor.random_pastel_gradient()
             # )
             # webhook.set_masquerade(masquerade)
 
@@ -1716,7 +1833,7 @@ async def post_to_single_stoat_webhook(
                 log.info(f"✅ Content posted successfully")
                 return True
             else:
-                log.error(f"❌ Failed to post content. HTTP {response.status_code}")
+                log.error(f"❌ Failed to post content. HTTP {response.status}")
                 return False
 
     except Exception as e:
@@ -1892,7 +2009,7 @@ async def main():
                     cutoff_candidates.append(checkpoints.get("stoat", handler_name))
 
                 # Fallback if somehow neither is configured
-                cutoff_time = min(cutoff_candidates) if cutoff_candidates else datetime.utcnow()
+                cutoff_time = min(cutoff_candidates) if cutoff_candidates else datetime.now(timezone.utc)
                 log.info(f"Processing {handler_name}, cutoff: {cutoff_time} (UTC)")
 
                 # Add to twitter_user_list
@@ -2036,5 +2153,5 @@ async def main():
 
 if __name__ == "__main__":
     # Run the async main function
-    with ScriptLock('kuri.lock', script_dir=script_dir, logger=log) as lock:
+    with ScriptLock('kuri.lock', script_dir_param=script_dir, logger=log) as lock:
         asyncio.run(main())

@@ -3,9 +3,10 @@
     "embedFooterText" : "Kurisutaru Twitter to Discord",
     "embedFooterImageUrl" : "https://i.imgur.com/yae4JIT.png",
     "includeReTweet" : false,
-    "generateEmbed" : true,
+    "generateEmbed" : false,
     "useFxTwitterLinkInDiscord" : false,
-    "useCustomProfile": true
+    "useCustomProfile": false,
+    "useDiscordComponentV2": false
   },
   "profile" : {
     "username" : "Kuri Test 123™",
