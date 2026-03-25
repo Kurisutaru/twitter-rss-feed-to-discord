@@ -6,8 +6,9 @@ This project enables the pooling of data from a Nitter RSS feed sourced from a p
 
 ## Changelogs
 
-- [Added] **RSS Video Fallback System**: When Nitter RSS includes a video thumbnail but **no video URL**, the script now pulls the video from **fxtwitter.com** to ensure full embed support in Discord. Includes detailed flowchart.
-- [Added] Config switch to not generate my own embed implementation, also replacing the posted link with something else (like fxtwitter.com), or keep it blank if you don't want to change. .
+- **[Changed] Migrate from Discord-Webhook to Discord.py**
+- **[Added] Discord Only** : Component V2, the layout mimicking or at least visually closeable enough with old Embed.
+- **RSS Video Fallback System**: When Nitter RSS includes a video thumbnail but **no video URL**, the script now pulls the video from **fxtwitter.com** to ensure full embed support in Discord. Includes detailed flowchart.
 - Config switch to not generate my own embed implementation, also replacing the posted link with something else (like fxtwitter.com), or keep it blank if you don't want to change.
 - Now supports multiple webhooks and multiple user mentions.
 - Revamped core code (mostly taken from my other project).

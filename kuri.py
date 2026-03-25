@@ -307,8 +307,8 @@ class EntryData:
 
 @dataclass
 class Config:
-    embedFooterText: str
-    embedFooterImageUrl: str
+    embedFooterText: str = ""
+    embedFooterImageUrl: Optional[str] = None
     includeReTweet: bool = False
     generateEmbed: bool = False
     useFxTwitterLinkInDiscord: bool = False
@@ -318,8 +318,8 @@ class Config:
 
 @dataclass
 class Profile:
-    username: str
-    avatarUrl: str
+    username: Optional[str] = None
+    avatarUrl: Optional[str] = None
 
 
 @dataclass
@@ -334,9 +334,9 @@ class TwitterWatch:
 @dataclass
 class TwitterDiscordConfig(DataClassJSONMixin):
     config: Config
-    profile: Profile
     nitterServer: list[str]
-    twitterWatch: list[TwitterWatch]
+    profile: Optional[Profile] = None
+    twitterWatch: list[TwitterWatch] = field(default_factory=list)
 
 
 @dataclass
