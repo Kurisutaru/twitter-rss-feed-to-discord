@@ -29,7 +29,7 @@ import feedparser
 import orjson
 from aiohttp import ClientSession, TCPConnector, ClientTimeout
 from bs4 import BeautifulSoup
-from discord.ui import LayoutView
+from discord.ui import LayoutView, Separator
 from feedparser import FeedParserDict
 from loguru import logger as log
 # Keep lxml import – used in RSS patching
@@ -1264,7 +1264,7 @@ def generate_discord_container_v2_data(
     )
 
     # I feel its better use small heading ? instead normal text, to emphasize like old embed ?
-    author_line = f"### **[{author_name}]({author_url})**" if author_name else ""
+    author_line = f"## **[{author_name}]({author_url})**" if author_name else ""
 
     cleaned = ""
     if title:
