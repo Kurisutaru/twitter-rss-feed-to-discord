@@ -20,7 +20,7 @@ from operator import attrgetter
 from os.path import isfile
 from pathlib import Path
 from typing import List, Optional, Union
-from urllib.parse import urljoin, unquote, urlparse
+from urllib.parse import urljoin, unquote, urlparse, quote
 from warnings import deprecated
 
 import dateutil.parser
@@ -29,6 +29,7 @@ import feedparser
 import orjson
 from aiohttp import ClientSession, TCPConnector, ClientTimeout
 from bs4 import BeautifulSoup
+from bs4.element import NavigableString
 from discord.ui import LayoutView, Separator
 from feedparser import FeedParserDict
 from loguru import logger as log
@@ -1032,156 +1033,151 @@ def clean_tweet_text(title: str) -> str:
 
 def clean_tweet_description(html_content: str) -> str:
     """
-    Clean tweet description by:
-    1. Removing images and videos
-    2. Converting links to Discord Markdown format
-    3. Replacing nitter URLs with x.com
-    4. Showing full URLs without protocol ONLY for truncated links (containing ...)
-    5. Keeping hashtag and mention links with their original text
-    6. Keeping protocol for specific domains in the exclusion list
-    7.a. Converting blockquotes to Discord multi-line quote format (>>> prefix) < this not work
-    7.b. Converting blockquotes to Discord multi-single-line quote format (>{space}) < this work
+    Remake version, I think the old one just plain wrong, or my logic just that bad
+    Clean tweet description into Discord-ready Markdown text:
+    1. <br> → newline
+    2. <hr> → removed
+    3. <img>/<video>/<source> → removed (entire line dropped if it was media-only)
+    4. <a> → Discord Markdown [display](url)
+       - nitter URLs replaced with x.com
+       - protocol stripped from display text, EXCEPT on list keep_protocol_domains
+       - truncated links (…) expand to full href as display text
+       - #hashtag links → [#tag](https://x.com/hashtag/tag)
+    5. <blockquote> → each content line prefixed with "> "
+       - blank lines inside preserved as "> " (intended spacing)
+       - trailing blank quote lines stripped
+    6. Consecutive blank lines outside blockquotes collapsed to one
+
+    Kuri Note : Please open issue if anything wrong
     """
-    soup = BeautifulSoup(html_content, 'lxml')
 
-    # List of domains that should keep the protocol in display text
-    keep_protocol_domains = [
-        'discord.gg',
-        'discord.com',
-    ]
+    # Domains whose display text must keep the https:// protocol
+    keep_protocol_domains = ['discord.gg', 'discord.com']
 
-    # === CONVERT <br> TO NEWLINES (but remove <br> inside links) ===
-    # Remove <br> tags that are inside <a> tags (they break Markdown links)
-    for link in soup.find_all('a'):
-        for br in link.find_all('br'):
-            br.decompose()
-
-    # === PROCESS BLOCKQUOTES FIRST (but keep structure for now) ===
-    blockquotes = soup.find_all('blockquote')
-    for blockquote in blockquotes:
-        # Mark blockquote with a special marker that survives text extraction
-        blockquote.insert(0, soup.new_string('\n__QUOTE_START__\n\n'))
-        blockquote.append(soup.new_string('\n__QUOTE_END__\n'))
-
-    # Remove images and videos (but keep links!)
-    for tag in soup.find_all(['img', 'video', 'source']):
-        tag.decompose()
-
-    # Process all links
-    for link in soup.find_all('a'):
-        href = link.get('href', '')
-        # Re-get text after normalization
-        link_text = ' '.join(link.get_text().split())
-        link_text = replace_nitter_url_to_twitter_url(link_text)
+    def format_link(href: str, display: str) -> str:
+        """Return a Discord Markdown link, applying all URL/display rules."""
+        href = replace_nitter_url_to_twitter_url(href)
+        display = replace_nitter_url_to_twitter_url(display.strip())
 
         if not href:
-            continue
+            return display
 
-        # Skip hashtag links - we'll handle them separately
-        if link_text.startswith('#'):
-            continue
+        # Hashtag links
+        if display.startswith('#'):
+            tag = display[1:]
+            return f'[{display}](https://x.com/hashtag/{quote(tag)})'
 
-        # Replace nitter URL to twitter URL
-        href = replace_nitter_url_to_twitter_url(href)
+        # Domains that must keep the protocol in display
+        # I'm not sure if just left that link or wrap as Markdown Link ?
+        # [link](link) or something
+        if any(d in href for d in keep_protocol_domains):
+            return f'{href}'
 
-        # Check if domain should keep protocol
-        should_keep_protocol = any(domain in href for domain in keep_protocol_domains)
+        # Truncated link -> use full href as display, strip protocol
+        if '…' in display or '...' in display:
+            display = href.replace('https://', '').replace('http://', '')
+            return f'[{display}]({href})'
 
-        # Check if link text is a URL (starts with http:// or https://)
-        link_text_is_url = link_text.startswith('http://') or link_text.startswith('https://')
+        # Normal link -> strip protocol from display only
+        display_clean = display.replace('https://', '').replace('http://', '')
+        return f'[{display_clean}]({href})'
 
-        # Check if link text matches href (normalized comparison)
-        link_text_normalized = link_text.replace('http://', '').replace('https://', '').strip()
-        href_normalized = href.replace('http://', '').replace('https://', '').strip()
-        text_matches_href = link_text_normalized == href_normalized
+    def node_to_text(tag) -> str:
+        """
+        Recursively convert a BeautifulSoup node to plain Discord markdown text.
+        Handles all relevant tags inline so we never need post-processing sentinels.
+        """
+        if isinstance(tag, NavigableString):
+            node_text = str(tag)
+            # If the previous sibling was a <br>, the source HTML often has a literal
+            # newline right after it,strip that one leading newline to avoid doubling
+            prev = tag.previous_sibling
+            if prev and getattr(prev, 'name', None) == 'br' and node_text.startswith('\n'):
+                node_text = node_text[1:]
+            return node_text
 
-        if should_keep_protocol:
-            link.replace_with(href)
-        elif link_text_is_url and text_matches_href:
-            # Link text is a URL that matches href - use Markdown with protocol removed
-            display_text = link_text.replace('https://', '').replace('http://', '')
-            link.replace_with(f'[{display_text}]({href})')
-        elif '…' in link_text or '...' in link_text:
-            # Truncated link - show full URL without protocol
-            display_text = href.replace('https://', '').replace('http://', '')
-            link.replace_with(f'[{display_text}]({href})')
-        else:
-            # Descriptive text - keep as is
-            link.replace_with(f'[{link_text}]({href})')
+        name = tag.name
 
-    # Remove all remaining hashtag links (we'll recreate them)
-    for link in soup.find_all('a'):
-        link_text = link.get_text()
-        if link_text.startswith('#'):
-            link.replace_with(link_text)
+        # Discard media entirely, no placeholder, just empty string
+        if name in ('img', 'video', 'source'):
+            return ''
 
-    # Get text directly - this preserves all newlines
-    text = soup.get_text()
+        # <br> -> newline
+        if name == 'br':
+            return '\n'
 
-    # Convert standalone hashtags to clickable links
-    import re
-    from urllib.parse import quote
+        # <hr> -> empty (removed)
+        if name == 'hr':
+            return ''
 
-    def replace_hashtag(match):
-        hashtag_with_hash = match.group(0)
-        hashtag_without_hash = hashtag_with_hash[1:]
-        # URL encode the hashtag text
-        encoded = quote(hashtag_without_hash)
-        return f'[{hashtag_with_hash}](https://x.com/hashtag/{encoded})'
+        # <a> -> markdown link
+        if name == 'a':
+            href = tag.get('href', '')
+            display = tag.get_text()
+            return format_link(href, display)
 
-    # Match hashtags that are NOT already inside Markdown links
-    hashtag_pattern = r'(?<!\[)#\w+(?!\]\()'
-    text = re.sub(hashtag_pattern, replace_hashtag, text)
+        # <blockquote> -> process children, then prefix every line with "> "
+        if name == 'blockquote':
+            inner = ''.join(node_to_text(child) for child in tag.children)
+            process_lines = inner.split('\n')
+            quoted = []
+            previous_blank = False
+            for process_line in process_lines:
+                if line.strip():
+                    quoted.append(f'> {process_line}')
+                    previous_blank = False
+                else:
+                    if not previous_blank:
+                        quoted.append('> ')
+                    previous_blank = True
+            # Strip trailing blank quote lines
+            while quoted and quoted[-1] == '> ':
+                quoted.pop()
+            return '\n' + '\n'.join(quoted) + '\n'
 
-    # === NOW PROCESS THE QUOTE MARKERS ===
-    # Split by quote markers and add > prefix to each line of quoted sections (Discord single-line quote)
-    if '__QUOTE_START__' in text and '__QUOTE_END__' in text:
-        parts = []
-        segments = text.split('__QUOTE_START__')
+        # Block-level tags, recurse into children
+        if name in ('p', 'div', 'footer', 'cite', 'b', 'strong', 'em', 'i', 'span'):
+            inner = ''.join(node_to_text(child) for child in tag.children)
+            return inner
 
-        for i, segment in enumerate(segments):
-            if i == 0:
-                # First segment is before any quote
-                if segment.strip():
-                    parts.append(segment.strip())
-            else:
-                # This segment contains a quote
-                if '__QUOTE_END__' in segment:
-                    quote_part, after_quote = segment.split('__QUOTE_END__', 1)
+        # Unknown/unhandled tag (e.g. [document], comment nodes, etc.), recurse if possible
+        if name is None or not hasattr(tag, 'children'):
+            return ''
+        return ''.join(node_to_text(child) for child in tag.children)
 
-                    # Clean up the quote part
-                    quote_text = quote_part.strip()
+    soup = BeautifulSoup(html_content, 'lxml')
 
-                    if quote_text:
-                        # Add "> " prefix to each line instead of ">>> "
-                        quoted_lines = [f"> {line}" for line in quote_text.split('\n')]
-                        parts.append('\n'.join(quoted_lines))
+    # Convert the whole document to text using our recursive converter
+    text = node_to_text(soup)
 
-                    # Add the part after the quote
-                    if after_quote.strip():
-                        parts.append(after_quote.strip())
-
-        text = '\n\n'.join(parts)
-
-    # Clean up excessive whitespace
+    # Clean up lines:
+    # - Drop lines that are blank ONLY because media was removed
+    #   (a line is "media-blank" if it's empty and was not preceded by real content on the same line —
+    #    the recursive converter already returns '' for media, so consecutive \n\n from <img>\n<img>
+    #    just collapses naturally here)
+    # - Collapse consecutive blank lines to one (outside blockquotes already handled above)
+    # Because sometimes on blockquote, its format like
+    # <img>
+    # <img>
+    # blank
+    # </p>
+    # The result will be triple blank line, tried to remove the line if only img / video
     lines = text.split('\n')
-    cleaned_lines = []
-    prev_empty = False
+    cleaned = []
+    prev_blank = False
 
     for line in lines:
-        stripped = line.strip()
-        if stripped:
-            cleaned_lines.append(line)
-            prev_empty = False
-        elif not prev_empty:
-            # Allow one empty line
-            cleaned_lines.append('')
-            prev_empty = True
+        if line.strip():
+            cleaned.append(line)
+            prev_blank = False
+        else:
+            # Preserve blank lines inside blockquotes (they're already "> ")
+            # For regular blank lines, allow only one consecutive
+            if not prev_blank:
+                cleaned.append(line)
+            prev_blank = True
 
-    text = '\n'.join(cleaned_lines)
-
-    # Strip only leading/trailing whitespace
-    return text.strip()
+    return '\n'.join(cleaned).strip()
 
 
 @deprecated("Use RandomEmbedColor")
