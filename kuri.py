@@ -426,6 +426,13 @@ class DestinationCheckpoints:
         for destination, handlers in other.destinations.items():
             self.destinations.setdefault(destination, {}).update(handlers)
 
+    def remove_nonexist_handler(self, handler_list: list[str]):
+        """Remove destinations where no handler keys exist in handler_list."""
+        for destination, handlers in self.destinations.items():
+            self.destinations[destination] = {
+                handle: dt for handle, dt in handlers.items()
+                if handle in handler_list
+            }
 
 @dataclass(frozen=True)
 class RandomEmbedColor:
@@ -1216,6 +1223,9 @@ def generate_discord_embed_data(title: str, payload: WebhookMediaPayload,
 
     footer = main_config.config.embedFooterText
 
+    #Remove any emoji
+    footer = re.sub(r'<:[A-Za-z0-9_]+:[0-9]+>', '', footer)
+
     if payload.image_count > 0:
         footer += __footer_append_template.format(f"{payload.image_count}{__emoji_photo}")
     if payload.video_count > 0:
@@ -1626,7 +1636,7 @@ async def post_to_single_discord_webhook(
 
             # Component V2
             if main_config.config.useDiscordComponentV2:
-                log.info("Sending with Component V2 (generateEmbed=True, useDiscordComponentV2=True)")
+                log.info("Sending with Component V2 (useDiscordComponentV2=True)")
 
                 author_icon_filename = payload.author_icon_filename if payload.author_icon_data else None
                 author_icon_url_fallback = twitter_user.icon if not author_icon_filename else None
@@ -1665,7 +1675,7 @@ async def post_to_single_discord_webhook(
 
             # Discord Embed
             else:
-                log.info("Sending with embed V1 (generateEmbed=True)")
+                log.info("Sending with embed V1 (useDiscordComponentV2=false)")
                 embeds = []
 
                 if payload.images:
@@ -1984,6 +1994,7 @@ async def main():
 
             twitter_user_list: List[TwitterUser] = []
             entry_data: List[EntryData] = []
+            handle_list = [item.twitterHandleName for item in main_config.twitterWatch]
 
             nitter_server_distribution_list = random.choices(main_config.nitterServer, k=len(main_config.twitterWatch))
 
@@ -2138,7 +2149,9 @@ async def main():
             log.info(f"Successfully posted {posted_count}/{len(entry_data)} tweets")
 
             # Merge latest into checkpoints and save
+            # Addition : Remove non exist handler / removed twitter handle
             if latest.destinations:
+                checkpoints.remove_nonexist_handler(handle_list)
                 checkpoints.merge(latest)
                 write_last_run_per_handler(checkpoints)
 
