@@ -309,6 +309,7 @@ class EntryData:
 @dataclass
 class Config:
     embedFooterText: str = ""
+    embedFooterUrl: Optional[str] = None
     embedFooterImageUrl: Optional[str] = None
     includeReTweet: bool = False
     generateEmbed: bool = False
@@ -1112,8 +1113,15 @@ def clean_tweet_description(html_content: str) -> str:
 
         # <a> -> markdown link
         if name == 'a':
+            # Update to remove a Video text with link but no video link at all
+            # Like [Video](some x.com url)
+            inner_img = tag.find('img')
+            if inner_img:
+                img_src = inner_img.get('src', '')
+                if __post_video_identifier in img_src or 'amplify_video_thumb' in img_src:
+                    return ''
             href = tag.get('href', '')
-            display = tag.get_text()
+            display = tag.get_text().strip()
             return format_link(href, display)
 
         # <blockquote> -> process children, then prefix every line with "> "
@@ -1289,6 +1297,10 @@ def generate_discord_container_v2_data(
 
     # footer blocks
     footer = main_config.config.embedFooterText
+
+    if main_config.config.embedFooterUrl:
+        footer = f"[{footer}]({main_config.config.embedFooterUrl})"
+
     if payload.image_count > 0:
         footer += __footer_append_template.format(f"{payload.image_count} {__emoji_photo}")
     if payload.video_count > 0:
