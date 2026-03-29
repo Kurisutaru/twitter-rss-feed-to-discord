@@ -1,10 +1,15 @@
 [project]
 name = "twitter-rss-feed-to-discord"
 version = "0.1.0"
-description = "Add your description here"
+description = "Pooling data from RSS Feed at public or private Nitter instance to Discord Webhook Embed. Now support Discord Component V2 !"
+license = {text = "MIT"}
+readme = "README.md"
+authors = [
+    { name = "Kurisutaru" }
+]
 requires-python = ">=3.13"
 dependencies = [
-    "aiohttp>=3.13.3",
+    "aiohttp>=3.13.4",
     "beautifulsoup4>=4.14.3",
     "discord-py>=2.7.1",
     "feedparser>=6.0.12",
@@ -13,3 +18,6 @@ dependencies = [
     "mashumaro[orjson]>=3.20",
     "python-dateutil>=2.9.0.post0",
 ]
+[project.urls]
+Homepage = "https://github.com/Kurisutaru/twitter-rss-feed-to-discord"
+Repository = "https://github.com/Kurisutaru/twitter-rss-feed-to-discord"

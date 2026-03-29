@@ -101,7 +101,7 @@ class StoatMasquerade:
     name: Optional[str] = None
     """Custom username to display instead of the webhook's default name."""
 
-    avatar: Optional[str] = None
+    avatar_url: Optional[str] = None
     """URL of the avatar to display.
 
     External https URLs are supported here (unlike in embeds).
@@ -201,9 +201,6 @@ class StoatWebhook:
     def remove_attachments(self) -> None:
         self.attachments.clear()
 
-    def add_masquerade(self, masquerade: StoatMasquerade) -> None:
-        self.masquerade = masquerade
-
     def byte_len(self, s: str) -> int:
         return len(s.encode("utf-8"))
 
@@ -237,10 +234,10 @@ class StoatWebhook:
                 masquerade_dict["name"] = self.masquerade.name
 
             # avatar: max 256
-            if self.masquerade.avatar and len(self.masquerade.avatar) > 256:
-                self.masquerade.avatar = self.masquerade.avatar[:253] + "..."
-            if self.masquerade.avatar:
-                masquerade_dict["avatar"] = self.masquerade.avatar
+            if self.masquerade.avatar_url and len(self.masquerade.avatar_url) > 256:
+                self.masquerade.avatar_url = self.masquerade.avatar_url[:253] + "..."
+            if self.masquerade.avatar_url:
+                masquerade_dict["avatar"] = self.masquerade.avatar_url
 
             # colour: max 128 (hex almost never exceeds)
             if self.masquerade.colour and len(self.masquerade.colour) > 128:

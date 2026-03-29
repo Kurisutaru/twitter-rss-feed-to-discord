@@ -63,7 +63,7 @@ The integration with Discord Webhook Embeds ensures that tweets are presented in
 
 Before setting up this project, you need to have the following prerequisites:
 
-- Python (version 3.11 or higher)
+- Python (version 3.13 or higher)
 - Discord account and access to a Discord server with the "Manage Webhooks" permission
 - Twitter account (for the target user timeline you want to track)
 - Nitter Instance URL (public instance or self-hosted)

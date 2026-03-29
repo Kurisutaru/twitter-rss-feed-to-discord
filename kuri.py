@@ -30,7 +30,7 @@ import orjson
 from aiohttp import ClientSession, TCPConnector, ClientTimeout
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString
-from discord.ui import LayoutView, Separator
+from discord.ui import LayoutView
 from feedparser import FeedParserDict
 from loguru import logger as log
 # Keep lxml import – used in RSS patching
@@ -261,7 +261,7 @@ __video_upload_content: str = f"{__emoji_play}{__braille_pattern_blank}"
 __footer_append_template: str = ' • {}'
 __discord_maximum_file_size: int = 10
 __discord_maximum_embed_character: int = 4096
-__discord_component_v2_split_image_count : int = 4
+__discord_component_v2_split_image_count: int = 4
 
 # JSONFile
 __json_file: str = 'kuri.config.json'
@@ -435,6 +435,7 @@ class DestinationCheckpoints:
                 if handle in handler_list
             }
 
+
 @dataclass(frozen=True)
 class RandomEmbedColor:
     """
@@ -489,7 +490,8 @@ class RandomEmbedColor:
     @classmethod
     def random_with_alpha(cls, alpha: int = 255) -> "RandomEmbedColor":
         """Random color with custom alpha (0–255)."""
-        return cls.random().__class__(r=cls.random().r, g=cls.random().g, b=cls.random().b, a=alpha)
+        rand_color = cls.random()
+        return cls(rand_color.r, rand_color.g, rand_color.b, alpha)
 
     @classmethod
     def random_gradient(cls) -> str:
@@ -734,15 +736,15 @@ def generate_timestamp(input_time: Union["time.struct_time", str]) -> int:
 
 def generate_date_from_timestamp(input_time) -> datetime:
     """Convert timestamp to datetime"""
-    return datetime.fromtimestamp(input_time)
+    return datetime.fromtimestamp(input_time, tz=timezone.utc)
 
 
 def convert_mb_to_bytes(input_mb: int) -> int:
     return input_mb * 1024 * 1024
 
 
-def convert_bytes_to_mb(input_mb: int) -> float:
-    return input_mb / 1024 / 1024
+def convert_bytes_to_mb(input_bytes: int) -> float:
+    return input_bytes / 1024 / 1024
 
 
 def truncate_text(text: str, tweet_link: str, limit=__discord_maximum_embed_character):
@@ -1139,7 +1141,7 @@ def clean_tweet_description(html_content: str) -> str:
             quoted = []
             previous_blank = False
             for process_line in process_lines:
-                if line.strip():
+                if process_line.strip():
                     quoted.append(f'> {process_line}')
                     previous_blank = False
                 else:
@@ -1224,7 +1226,7 @@ def generate_discord_embed_data(title: str, payload: WebhookMediaPayload,
 
     footer = main_config.config.embedFooterText
 
-    #Remove any emoji
+    # Remove any emoji
     footer = re.sub(r'<:[A-Za-z0-9_]+:[0-9]+>', '', footer)
 
     if payload.image_count > 0:
@@ -1256,6 +1258,7 @@ def generate_stoat_embed_data(title: str, payload: WebhookMediaPayload,
         embed.icon_url = author_icon_url
 
     return embed
+
 
 # Hey its B E T A
 # Gonna replicate most of the part like old embed
@@ -1489,6 +1492,7 @@ async def generate_media_webhook(
             video_data, was_too_large = await download_video_smart(session, video_url, max_size=max_file_size)
 
             if video_data:
+                payload.video_uploaded = True
                 # Video downloaded successfully
                 downloaded_video = DownloadedMedia(
                     filename=filename,
@@ -1513,8 +1517,6 @@ async def generate_media_webhook(
                 )
                 payload.videos.append(url_only_video)
 
-            payload.video_uploaded = True
-
     # === CONCURRENT DOWNLOADS ===
     download_tasks = []
     task_metadata = []
@@ -1532,11 +1534,12 @@ async def generate_media_webhook(
         task_metadata.append((MediaType.IMAGE, media.url))
 
     # Tasks: Video thumbnails (ONLY if we don't have video)
-    if tweet_has_video and not payload.video_uploaded:
-        for media in video_thumbnails:
-            log.info(f"Queueing video thumbnail download (fallback): {media.url}")
-            download_tasks.append(download_media(session, media.url, max_size=max_file_size))
-            task_metadata.append((MediaType.VIDEO_THUMBNAIL, media.url))
+    # Update, redundant due already pull from fxtwitter
+    # if tweet_has_video and not payload.video_uploaded:
+    #    for media in video_thumbnails:
+    #        log.info(f"Queueing video thumbnail download (fallback): {media.url}")
+    #        download_tasks.append(download_media(session, media.url, max_size=max_file_size))
+    #        task_metadata.append((MediaType.VIDEO_THUMBNAIL, media.url))
 
     # Download all concurrently
     if download_tasks:
@@ -1858,7 +1861,9 @@ async def post_to_single_stoat_webhook(
         else:
             # Send just content without embed (simple mode)
             log.info("Sending without embed (generateEmbed=False)")
-            webhook = StoatWebhook(webhook_url=webhook_url, rate_limit_retry=True)
+            webhook = StoatWebhook(webhook_url=webhook_url,
+                                   session=session,
+                                   rate_limit_retry=True)
 
             if main_config.config.useCustomProfile:
                 masquerade = StoatMasquerade()
