@@ -252,6 +252,7 @@ __braille_pattern_blank = '\u2800'
 # Variable
 __twitter_url: str = 'https://x.com'
 __fxtwitter_url: str = 'https://fxtwitter.com'
+__fxtwitter_api_url: str = 'https://api.fxtwitter.com'
 __twitter_image_card_link_template: str = 'https://pbs.twimg.com/{}{}'
 __post_video_identifier: str = 'ext_tw_video_thumb'
 __rss_template: str = '{}/{}/rss'
@@ -1387,28 +1388,50 @@ async def get_author_icon(session: ClientSession, url: str) -> Optional[bytes]:
 
 async def fetch_video_from_fxtwitter(session: ClientSession, tweet_link: str) -> Optional[str]:
     """Fetch video URL from fxtwitter meta tags"""
-    fx_url = tweet_link.replace(__twitter_url, __fxtwitter_url)
+    fx_url = tweet_link.replace(__twitter_url, __fxtwitter_api_url)
 
     try:
         log.info(f"Fetching video from fxtwitter: {fx_url}")
         async with session.get(fx_url, timeout=ClientTimeout(total=60)) as response:
-            if response.ok:
-                html = await response.text()
-                soup = BeautifulSoup(html, 'lxml')
-
-                # Try multiple meta tags in priority order
-                for tag in ['twitter:player:stream', 'og:video:secure_url', 'og:video']:
-                    meta = soup.find('meta', property=tag)
-                    if meta and meta.get('content'):
-                        video_url = meta.get('content')
-                        log.info(f"✅ Found video URL from {tag}: {video_url}")
-                        return video_url
-
-                log.warning(f"No video meta tags found in {fx_url}")
+            if not response.ok:
+                log.warning(f"fxtwitter API returned HTTP {response.status}")
                 return None
+
+            data = orjson.loads(await response.read())
+
+            if data.get('code') != 200:
+                log.warning(f"fxtwitter API error: {data.get('message', 'unknown')}")
+                return None
+
+            videos = (data.get('tweet') or {}).get('media', {}).get('videos', [])
+            if not videos:
+                log.warning("No videos found in fxtwitter API response")
+                return None
+
+            # Take the first video (fxtwitter orders by relevance)
+            video = videos[0]
+            # 'video' | 'gif', but twitter 'gif' not 'gif', but mp4
+            # Can process to 'gif' with ffmpeg but eeeh ... lazy, also processing cost
+            video_type = video.get('type')
+
+            # For real videos: pick highest-bitrate variant
+            # For GIFs: I found its bitrate 0
+            # But anything ok I guess ? As long its high quality version and pick one
+            variants = video.get('variants') or video.get('formats') or []
+            if variants:
+                best = max(variants, key=lambda v: v.get('bitrate', 0))
+                video_url = best.get('url')
             else:
-                log.warning(f"Failed to fetch fxtwitter page: HTTP {response.status}")
-                return None
+                # Fallback to top-level url
+                video_url = video.get('url')
+
+            if video_url:
+                log.info(f"✅ Found {video_type} URL from fxtwitter API: {video_url}")
+            else:
+                log.warning("fxtwitter API: video entry had no usable URL")
+
+            return video_url
+
     except asyncio.TimeoutError:
         log.error(f"Timeout fetching fxtwitter page: {fx_url}")
         return None
