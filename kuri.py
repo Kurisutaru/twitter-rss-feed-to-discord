@@ -13,32 +13,32 @@ import tempfile
 import time
 import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from io import BytesIO
 from operator import attrgetter
 from os.path import isfile
 from pathlib import Path
-from typing import List, Optional, Union
-from urllib.parse import urljoin, unquote, urlparse, quote
+from typing import Optional, Union
+from urllib.parse import quote, unquote, urljoin, urlparse
 from warnings import deprecated
 
 import dateutil.parser
 import discord
 import feedparser
 import orjson
-from aiohttp import ClientSession, TCPConnector, ClientTimeout
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString
 from discord.ui import LayoutView
 from feedparser import FeedParserDict
 from loguru import logger as log
+
 # Keep lxml import – used in RSS patching
 # noinspection PyUnresolvedReferences
-from lxml import etree
 from mashumaro.mixins.json import DataClassJSONMixin
 
-from stoat_webhook import StoatWebhook, StoatEmbed, StoatMasquerade
+from stoat_webhook import StoatEmbed, StoatMasquerade, StoatWebhook
 
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -105,7 +105,7 @@ class ScriptLock:
         # ── Handle any pre-existing lock file ──────────────────────────
         if os.path.exists(self.lock_file):
             try:
-                with open(self.lock_file, 'r') as file:
+                with open(self.lock_file) as file:
                     old_pid = int(file.read().strip())
 
                 if self._is_process_running(old_pid):
@@ -117,7 +117,7 @@ class ScriptLock:
                               f"Removing stale lock file (PID: {old_pid} no longer alive)")
                     self._safe_remove(self.lock_file)
 
-            except (ValueError, IOError):
+            except (OSError, ValueError):
                 self._log('warning', "Removing invalid/unreadable lock file")
                 self._safe_remove(self.lock_file)
 
@@ -294,7 +294,7 @@ class EntryData:
     pubdate: datetime
     timestamp: float
     key: str
-    mediaList: List['TwitterMedia'] = field(default_factory=list)
+    mediaList: list['TwitterMedia'] = field(default_factory=list)
     hasVideo: bool = False
 
     def is_retweet(self) -> bool:
@@ -361,7 +361,7 @@ class MediaType(Enum):
 class DownloadedMedia:
     """Represents downloaded assets with proper typing"""
     filename: str
-    data: Optional[bytes]
+    data: bytes | None
     media_type: MediaType
     original_url: str
 
@@ -370,17 +370,17 @@ class DownloadedMedia:
 class WebhookMediaPayload:
     """Complete payload for webhook with proper separation of concerns"""
     # Author info
-    author_icon_data: Optional[bytes] = None
+    author_icon_data: bytes | None = None
     author_icon_filename: Optional[str] = None
 
     # Videos (DownloadedMedia with data=bytes for uploaded, data=None for URL-only)
-    videos: List[DownloadedMedia] = None
+    videos: list[DownloadedMedia] = None
 
     # Images to attach and embed
-    images: List[DownloadedMedia] = None
+    images: list[DownloadedMedia] = None
 
     # All attachments (images + author icon)
-    all_attachments: List[DownloadedMedia] = None
+    all_attachments: list[DownloadedMedia] = None
 
     # Metadata
     cleaned_description: str = ""
@@ -571,7 +571,7 @@ if not isfile(__json_file):
     log.error("Config file not found, abort current running script")
     exit(1)
 
-with open(__json_file, 'r') as f:
+with open(__json_file) as f:
     main_config = TwitterDiscordConfig.from_json(f.read())
 
 nitter_url_list: list[str] = [*main_config.nitterServer, 'http://nitter.net']
@@ -581,12 +581,12 @@ def read_last_run(filename: str = __last_run_file) -> datetime:
     """Read the last processed tweet timestamp from file."""
     try:
         if os.path.exists(filename):
-            with open(filename, 'r') as file:
+            with open(filename) as file:
                 timestamp_str = file.read()
                 timestamp_str = timestamp_str.strip()
                 last_run = datetime.fromisoformat(timestamp_str)
                 if last_run.tzinfo is not None:
-                    last_run = last_run.astimezone(timezone.utc).replace(tzinfo=None)
+                    last_run = last_run.astimezone(UTC).replace(tzinfo=None)
                 log.info(f"Last processed tweet timestamp: {last_run} (UTC)")
                 return last_run
         else:
@@ -601,7 +601,7 @@ def write_last_run(timestamp: datetime, filename: str = __last_run_file):
     """Write the timestamp of the latest processed tweet to file."""
     try:
         if timestamp.tzinfo is not None:
-            timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+            timestamp = timestamp.astimezone(UTC).replace(tzinfo=None)
 
         with open(filename, 'w') as file:
             file.write(timestamp.isoformat())
@@ -630,7 +630,7 @@ def read_last_run_per_handler(filename: str = __last_run_file) -> DestinationChe
             for handler, timestamp_str in handlers.items():
                 dt = dateutil.parser.parse(timestamp_str)
                 if dt.tzinfo is not None:
-                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    dt = dt.astimezone(UTC).replace(tzinfo=None)
                 result[handler] = dt
             return result
 
@@ -658,7 +658,7 @@ def write_last_run_per_handler(checkpoints: DestinationCheckpoints, filename: st
             result = {}
             for handler, dt in handlers.items():
                 if dt.tzinfo is not None:
-                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    dt = dt.astimezone(UTC).replace(tzinfo=None)
                 result[handler] = dt.isoformat()
             return result
 
@@ -671,7 +671,7 @@ def write_last_run_per_handler(checkpoints: DestinationCheckpoints, filename: st
             with os.fdopen(fd, 'wb') as temp_file:
                 temp_file.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
             shutil.move(temp_path, filename)
-            log.info(f"✅ Atomically updated checkpoints")
+            log.info("✅ Atomically updated checkpoints")
         except Exception as write_error:
             try:
                 os.unlink(temp_path)
@@ -705,7 +705,7 @@ def migrate_old_checkpoint():
                     checkpoints.update("stoat", item.twitterHandleName, old_timestamp)
 
             write_last_run_per_handler(checkpoints, new_file)
-            log.info(f"✅ Migrated checkpoint to per-destination/handler format")
+            log.info("✅ Migrated checkpoint to per-destination/handler format")
 
             backup_file = old_file + '.backup'
             shutil.move(old_file, backup_file)
@@ -736,7 +736,7 @@ def generate_timestamp(input_time: Union["time.struct_time", str]) -> int:
 
 def generate_date_from_timestamp(input_time) -> datetime:
     """Convert timestamp to datetime"""
-    return datetime.fromtimestamp(input_time, tz=timezone.utc)
+    return datetime.fromtimestamp(input_time, tz=UTC)
 
 
 def convert_mb_to_bytes(input_mb: int) -> int:
@@ -837,7 +837,7 @@ def replace_nitter_url_to_twitter_url(input_string: str) -> str:
 
 async def download_video_smart(session: ClientSession, url: str,
                                max_size: int = convert_mb_to_bytes(__discord_maximum_file_size)) -> tuple[
-    Optional[bytes], bool]:
+    bytes | None, bool]:
     """
     OPTIMIZED: Download video with streaming size check (no HEAD request needed).
     Returns: (data, was_too_large)
@@ -873,7 +873,7 @@ async def download_video_smart(session: ClientSession, url: str,
             log.info(f"✅ Video downloaded: {convert_bytes_to_mb(downloaded):.2f}MB")
             return b''.join(chunks), False
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.error(f"Timeout downloading video: {url}")
         return None, False
     except Exception as e:
@@ -918,7 +918,7 @@ def extract_video_url_from_nitter(nitter_video_url: str) -> str:
 
 def generate_twitter_embed_name(input_string: str) -> str:
     """Format Twitter username for embed"""
-    return_string = input_string.replace(' / ', ' (') + str(')')
+    return_string = input_string.replace(' / ', ' (') + ')'
     return return_string
 
 
@@ -933,7 +933,7 @@ def generate_twitter_picture_link(input_string: str, twitter_image_card_link_tem
     url_parse_data = urlparse(unquote(input_string))
     query_param = ""
     if bool(url_parse_data.query):
-        query_param = str('?') + url_parse_data.query
+        query_param = '?' + url_parse_data.query
     return_string = twitter_image_card_link_template.format(url_parse_data.path, query_param).replace('/pic/', '')
     return return_string
 
@@ -941,7 +941,7 @@ def generate_twitter_picture_link(input_string: str, twitter_image_card_link_tem
 def normalize_datetime_to_utc_naive(dt: datetime) -> datetime:
     """Normalize any datetime to UTC timezone-naive format for consistent comparison."""
     if dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt.astimezone(UTC).replace(tzinfo=None)
     else:
         return dt
 
@@ -996,7 +996,7 @@ def generate_media_filename(url: str, index: int = 0) -> str:
     return f"twitter_media_{url_hash}.{ext}"
 
 
-def extract_media_from_description(description: str, twitter_card_template: str) -> tuple[List[TwitterMedia], bool]:
+def extract_media_from_description(description: str, twitter_card_template: str) -> tuple[list[TwitterMedia], bool]:
     """Extract all media URLs from RSS description."""
     extracted_media_list = []
     video_detected = False
@@ -1084,7 +1084,7 @@ def clean_tweet_description(html_content: str) -> str:
         if any(d in href for d in keep_protocol_domains):
             return f'{href}'
 
-        # Truncated link -> use full href as display, strip protocol
+        # Truncated link -> use a full href as display, strip protocol
         if '…' in display or '...' in display:
             display = href.replace('https://', '').replace('http://', '')
             return f'[{display}]({href})'
@@ -1095,7 +1095,7 @@ def clean_tweet_description(html_content: str) -> str:
 
     def node_to_text(tag) -> str:
         """
-        Recursively convert a BeautifulSoup node to plain Discord markdown text.
+        Recursively convert a BeautifulSoup node to plain Discord Markdown text.
         Handles all relevant tags inline so we never need post-processing sentinels.
         """
         if isinstance(tag, NavigableString):
@@ -1219,7 +1219,7 @@ def generate_discord_embed_data(title: str, payload: WebhookMediaPayload,
     embed.colour = RandomEmbedColor.random().discord_int
 
     if timestamp:
-        embed.timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        embed.timestamp = datetime.fromtimestamp(timestamp, tz=UTC)
 
     if title:
         embed.description = clean_tweet_text(title)
@@ -1327,7 +1327,7 @@ def generate_discord_container_v2_data(
     return container
 
 
-async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url: str) -> Optional[FeedParserDict]:
+async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url: str) -> FeedParserDict | None:
     """Fetch RSS feed asynchronously"""
     rss_url = generate_rss_url(twitter_handle, nitter_url)
 
@@ -1341,7 +1341,7 @@ async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url
             else:
                 log.warning(f"Failed to fetch RSS for {twitter_handle}: HTTP {response.status}")
                 return None
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.error(f"Timeout fetching RSS for {twitter_handle}")
         return None
     except Exception as e:
@@ -1349,7 +1349,7 @@ async def fetch_rss_feed(session: ClientSession, twitter_handle: str, nitter_url
         return None
 
 
-async def download_media(session: ClientSession, url: str, max_size: int = convert_mb_to_bytes(25)) -> Optional[bytes]:
+async def download_media(session: ClientSession, url: str, max_size: int = convert_mb_to_bytes(25)) -> bytes | None:
     """Download assets file asynchronously with size limit"""
     try:
         async with session.get(url, timeout=ClientTimeout(total=30)) as response:
@@ -1362,7 +1362,7 @@ async def download_media(session: ClientSession, url: str, max_size: int = conve
             else:
                 log.warning(f"Failed to download assets: HTTP {response.status}")
                 return None
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.error(f"Timeout downloading: {url}")
         return None
     except Exception as e:
@@ -1370,7 +1370,7 @@ async def download_media(session: ClientSession, url: str, max_size: int = conve
         return None
 
 
-async def get_author_icon(session: ClientSession, url: str) -> Optional[bytes]:
+async def get_author_icon(session: ClientSession, url: str) -> bytes | None:
     """
     OPTIMIZED: Cache author icons to avoid re-downloading same profile pictures.
     Returns cached data if available, otherwise downloads and caches.
@@ -1384,7 +1384,7 @@ async def get_author_icon(session: ClientSession, url: str) -> Optional[bytes]:
 
     if data:
         _author_icon_cache[url] = data
-        log.debug(f"Cached author icon for future use")
+        log.debug("Cached author icon for future use")
 
     return data
 
@@ -1435,7 +1435,7 @@ async def fetch_video_from_fxtwitter(session: ClientSession, tweet_link: str) ->
 
             return video_url
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.error(f"Timeout fetching fxtwitter page: {fx_url}")
         return None
     except Exception as e:
@@ -1447,7 +1447,7 @@ async def generate_media_webhook(
         session: ClientSession,
         tweet_link: str,
         title: str,
-        tweet_media_list: List[TwitterMedia],
+        tweet_media_list: list[TwitterMedia],
         tweet_has_video: bool,
         twitter_user: TwitterUser
 ) -> WebhookMediaPayload:
@@ -1463,12 +1463,12 @@ async def generate_media_webhook(
 
     # Separate media by type
     videos_from_rss = [m for m in tweet_media_list if m.type == 'video']
-    video_thumbnails = [m for m in tweet_media_list if m.type == 'video_thumbnail']
+    # video_thumbnails = [m for m in tweet_media_list if m.type == 'video_thumbnail']
     images = [m for m in tweet_media_list if m.type == 'image']
 
     # === VIDEO HANDLING ===
     if tweet_has_video:
-        log.info(f"Tweet have video")
+        log.info("Tweet have video")
         if videos_from_rss:
             # Use video from RSS
             video_url = videos_from_rss[0].url
@@ -1479,7 +1479,7 @@ async def generate_media_webhook(
             video_url = await fetch_video_from_fxtwitter(session, tweet_link)
 
             if video_url:
-                log.info(f"✅ Got video URL from fxtwitter")
+                log.info("✅ Got video URL from fxtwitter")
             else:
                 log.warning("❌ Failed to get video from fxtwitter, will use thumbnails")
                 video_url = None
@@ -1545,7 +1545,7 @@ async def generate_media_webhook(
     if download_tasks:
         log.info(f"🚀 Starting {len(download_tasks)} concurrent downloads...")
         download_results = await asyncio.gather(*download_tasks, return_exceptions=True)
-        log.info(f"✅ All downloads completed")
+        log.info("✅ All downloads completed")
 
         # Process results with proper typing
         for (media_type, url), result in zip(task_metadata, download_results):
@@ -1847,13 +1847,12 @@ async def post_to_single_stoat_webhook(
             # Add Image into Content
             if payload.images:
                 for idx, media in enumerate(payload.images):
-                    is_first = idx == 0
                     content = f'{content} [{__braille_pattern_blank}]({media.original_url})'
 
             webhook.set_content(content)
             response = await webhook.execute()
             if response.ok:
-                log.info(f"✅ Embed posted successfully")
+                log.info("✅ Embed posted successfully")
                 return True
             else:
                 log.error(f"❌ Failed to post embed. HTTP {response.status} + {response.reason}")
@@ -1876,7 +1875,7 @@ async def post_to_single_stoat_webhook(
 
             response = await webhook.execute()
             if response.ok:
-                log.info(f"✅ Content posted successfully")
+                log.info("✅ Content posted successfully")
                 return True
             else:
                 log.error(f"❌ Failed to post content. HTTP {response.status}")
@@ -1890,7 +1889,7 @@ async def post_to_single_stoat_webhook(
 async def send_to_discord_with_media(session: ClientSession,
                                      tweet_link: str,
                                      embed_title: str,
-                                     tweet_media_list: List[TwitterMedia],
+                                     tweet_media_list: list[TwitterMedia],
                                      tweet_has_video: bool,
                                      timestamp: float,
                                      twitter_user: TwitterUser
@@ -1942,7 +1941,7 @@ async def send_to_discord_with_media(session: ClientSession,
 async def send_to_stoat_with_media(session: ClientSession,
                                    tweet_link: str,
                                    embed_title: str,
-                                   tweet_media_list: List[TwitterMedia],
+                                   tweet_media_list: list[TwitterMedia],
                                    tweet_has_video: bool,
                                    timestamp: float,
                                    twitter_user: TwitterUser
@@ -2020,8 +2019,8 @@ async def main():
                 }
         ) as session:
 
-            twitter_user_list: List[TwitterUser] = []
-            entry_data: List[EntryData] = []
+            twitter_user_list: list[TwitterUser] = []
+            entry_data: list[EntryData] = []
             handle_list = [item.twitterHandleName for item in main_config.twitterWatch]
 
             nitter_server_distribution_list = random.choices(main_config.nitterServer, k=len(main_config.twitterWatch))
@@ -2056,7 +2055,7 @@ async def main():
                     cutoff_candidates.append(checkpoints.get("stoat", handler_name))
 
                 # Fallback if somehow neither is configured
-                cutoff_time = min(cutoff_candidates) if cutoff_candidates else datetime.now(timezone.utc)
+                cutoff_time = min(cutoff_candidates) if cutoff_candidates else datetime.now(UTC)
                 log.info(f"Processing {handler_name}, cutoff: {cutoff_time} (UTC)")
 
                 # Add to twitter_user_list

@@ -18,6 +18,29 @@ dependencies = [
     "mashumaro[orjson]>=3.20",
     "python-dateutil>=2.9.0.post0",
 ]
+
 [project.urls]
 Homepage = "https://github.com/Kurisutaru/twitter-rss-feed-to-discord"
 Repository = "https://github.com/Kurisutaru/twitter-rss-feed-to-discord"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (unused imports, undefined vars, etc.)
+    "I",    # isort (import ordering)
+    "UP",   # pyupgrade (modernize syntax)
+]
+ignore = [
+    "E501",
+    "UP045",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.8",
+]

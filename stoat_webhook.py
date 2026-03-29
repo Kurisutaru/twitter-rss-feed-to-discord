@@ -1,7 +1,7 @@
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Any
 
 import aiohttp
 from loguru import logger
@@ -23,7 +23,7 @@ class StoatEmbed:
     in `media` — only internal file IDs.
     """
 
-    title: Optional[str] = None
+    title: str | None = None
     """Embed title.
 
     Constraints:
@@ -32,7 +32,7 @@ class StoatEmbed:
     Example: "Event Announcement"
     """
 
-    description: Optional[str] = None
+    description: str | None = None
     """Main embed body text (supports basic markdown).
 
     Constraints:
@@ -41,7 +41,7 @@ class StoatEmbed:
     Example: "Picora’s Photo Decor Celebration Event!\\nFollow @trickcal_en to join."
     """
 
-    url: Optional[str] = None
+    url: str | None = None
     """URL that the embed title and sometimes image link to.
 
     Constraints:
@@ -50,7 +50,7 @@ class StoatEmbed:
     Example: "https://trickcal.biligames.com/en/"
     """
 
-    colour: Optional[str] = None
+    colour: str | None = None
     """Primary colour of the embed (left border and accents).
 
     Also accepted as `color` (alias).
@@ -69,7 +69,7 @@ class StoatEmbed:
         - "var(--primary)" (CSS variable)
     """
 
-    icon_url: Optional[str] = None
+    icon_url: str | None = None
     """URL of a small icon displayed next to the title (limited support).
 
     Constraints:
@@ -80,7 +80,7 @@ class StoatEmbed:
     Example: "https://example.com/small-icon.png"
     """
 
-    media: Optional[str] = None
+    media: str | None = None
     """Autumn file ID of the main image/media.
 
     Must be a valid attachment ID obtained from uploading to Autumn.
@@ -98,17 +98,17 @@ class StoatMasquerade:
     Allows changing the displayed name, avatar and name colour of the webhook message.
     """
 
-    name: Optional[str] = None
+    name: str | None = None
     """Custom username to display instead of the webhook's default name."""
 
-    avatar_url: Optional[str] = None
+    avatar_url: str | None = None
     """URL of the avatar to display.
 
     External https URLs are supported here (unlike in embeds).
     Example: "https://pbs.twimg.com/profile_images/1925849773870854144/mwiH5RlP_400x400.jpg"
     """
 
-    colour: Optional[str] = None
+    colour: str | None = None
     """Custom colour for the displayed name (same format as embed.colour)."""
 
 
@@ -120,23 +120,23 @@ class StoatWebhookPayload:
     https://developers.stoat.chat/api-reference/#tag/webhooks/POST/webhooks/{webhook_id}/{token}
     """
 
-    content: Optional[str] = None
+    content: str | None = None
     """Plain text content of the message.
 
     If this contains only a URL (e.g. tweet/X link), Stoat usually generates
     an automatic embed preview including image(s).
     """
 
-    embeds: List[StoatEmbed] = field(default_factory=list)
+    embeds: list[StoatEmbed] = field(default_factory=list)
     """List of rich embeds to include in the message.
 
     Maximum practical limit is usually 1–4 (rendering degrades after ~5).
     """
 
-    masquerade: Optional[StoatMasquerade] = None
+    masquerade: StoatMasquerade | None = None
     """Override the webhook's displayed name, avatar and colour."""
 
-    attachments: List[str] = field(default_factory=list)
+    attachments: list[str] = field(default_factory=list)
     """List of Autumn file IDs to attach to the message (shown below text/embeds).
 
     Example: ["01JABC...", "01JDEF..."]
@@ -151,7 +151,7 @@ class StoatWebhook:
             webhook_url: str,
             *,
             rate_limit_retry: bool = True,
-            session: Optional[aiohttp.ClientSession] = None
+            session: aiohttp.ClientSession | None = None
     ):
         self.webhook_url = webhook_url.rstrip("/")
         match = re.match(r".*/webhooks/([^/]+)/(.+?)(?:/|$)", self.webhook_url)
@@ -164,12 +164,12 @@ class StoatWebhook:
         self.rate_limit_retry = rate_limit_retry
 
         # Mutable state (like discord-webhook)
-        self.embeds: List[StoatEmbed] = []
-        self.content: Optional[str] = None
-        self.masquerade: Optional[StoatMasquerade] = None
-        self.attachments: List[str] = []  # file IDs
-        self.last_response: Optional[aiohttp.ClientResponse] = None
-        self.last_message_id: Optional[str] = None
+        self.embeds: list[StoatEmbed] = []
+        self.content: str | None = None
+        self.masquerade: StoatMasquerade | None = None
+        self.attachments: list[str] = []  # file IDs
+        self.last_response: aiohttp.ClientResponse | None = None
+        self.last_message_id: str | None = None
 
         self.max_length = 2000
 
@@ -213,9 +213,9 @@ class StoatWebhook:
         # Truncate to limit bytes, then decode safely ignoring partial chars
         return encoded[:limit].decode("utf-8", errors="ignore") + suffix
 
-    def _build_payload(self) -> Dict:
+    def _build_payload(self) -> dict:
 
-        payload: Dict[str, Any] = {}
+        payload: dict[str, Any] = {}
         available_max_length = self.max_length
 
         if self.content is not None:
