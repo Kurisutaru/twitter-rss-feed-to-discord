@@ -1282,7 +1282,8 @@ def generate_discord_container_v2_data(
     )
 
     # I feel its better use small heading ? instead normal text, to emphasize like old embed ?
-    author_line = f"## **[{author_name}]({author_url})**" if author_name else ""
+    # Scrap it, its too big for H2
+    author_line = f"### **[{author_name}]({author_url})**" if author_name else ""
 
     cleaned = ""
     if title:
